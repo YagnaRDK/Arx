@@ -4,8 +4,10 @@
   "type": "module",
   "scripts": {
     "dev": "bun run src/index.ts",
-    "test": "bunx vitest",
-    "build": "tsc"
+    "test": "bunx vitest run",
+    "test:watch": "bunx vitest",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit"
   },
   "private": true,
   "dependencies": {

@@ -6,7 +6,7 @@ export const IntentSchema = z.object({
 
   action: z.string().min(1),
   protocol: z.string().min(1),
-  chainId: z.number().int(),
+  chainId: z.number().int().positive(),
 
   inputToken: z.string().min(1),
   outputToken: z.string().min(1),

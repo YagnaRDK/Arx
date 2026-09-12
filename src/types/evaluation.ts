@@ -1,0 +1,25 @@
+export type PolicyCode =
+  | "POLICY_APPROVED"
+  | "CAPABILITY_NOT_FOUND"
+  | "CAPABILITY_ID_MISMATCH"
+  | "CAPABILITY_EXPIRED"
+  | "CAPABILITY_REVOKED"
+  | "CAPABILITY_CONSUMED"
+  | "CAPABILITY_INACTIVE"
+  | "AGENT_MISMATCH"
+  | "ACTION_NOT_ALLOWED"
+  | "PROTOCOL_NOT_ALLOWED"
+  | "CHAIN_NOT_ALLOWED"
+  | "INPUT_TOKEN_NOT_ALLOWED"
+  | "OUTPUT_TOKEN_NOT_ALLOWED"
+  | "AMOUNT_EXCEEDED"
+  | "SLIPPAGE_EXCEEDED"
+  | "INVALID_NONCE"
+  | "REPLAY_DETECTED"
+  | "INVALID_INTENT";
+
+export type EvaluationResult = {
+  allowed: boolean;
+  code: PolicyCode;
+  reason: string;
+};

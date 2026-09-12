@@ -1,13 +1,12 @@
 import Fastify from "fastify";
-
-// import { CapabilitySchema } from "../types/capability";
-// import { IntentSchema } from "../types/intent";
-
-import { PolicyEngine } from "../policy/policy-engine";
-import { validateCapability, validateIntent } from "../policy/validators";
+import { randomUUID } from "node:crypto";
 
 import { CapabilityStore } from "../storage/capability-store";
 import { ReplayStore } from "../storage/replay-store";
+
+import { validateCapability, validateIntent } from "../policy/validators";
+import { AuditStore } from "../storage/audit-store";
+import { PolicyEngine } from "../policy/policy-engine";
 
 export function buildServer() {
   const app = Fastify({
@@ -16,12 +15,14 @@ export function buildServer() {
 
   const capabilityStore = new CapabilityStore();
   const replayStore = new ReplayStore();
+  const auditStore = new AuditStore();
   const policyEngine = new PolicyEngine();
 
   app.get("/", async () => {
     return {
-      name: "Arx Policy Engine",
-      status: "running",
+      service: "Arx Policy Engine",
+      status: "operational",
+      version: "0.2.0",
     };
   });
 
@@ -29,22 +30,23 @@ export function buildServer() {
     const validation = validateCapability(request.body);
 
     if (!validation.success) {
-      return reply.status(400).send({
+      return reply.code(400).send({
         error: "INVALID_CAPABILITY",
-        details: validation.errors,
+        details: validation.error.flatten(),
       });
     }
 
     try {
       const capability = capabilityStore.create(validation.data);
 
-      return reply.status(201).send({
+      return reply.code(201).send({
         capability,
       });
     } catch (error) {
-      return reply.status(409).send({
-        error: "CAPABILITY_CREATION_FAILED",
-        reason: error instanceof Error ? error.message : "Unknown error",
+      request.log.error(error);
+
+      return reply.code(409).send({
+        error: "CAPABILITY_ALREADY_EXISTS",
       });
     }
   });
@@ -57,14 +59,14 @@ export function buildServer() {
     const capability = capabilityStore.get(request.params.capabilityId);
 
     if (!capability) {
-      return reply.status(404).send({
+      return reply.code(404).send({
         error: "CAPABILITY_NOT_FOUND",
       });
     }
 
-    return reply.send({
+    return {
       capability,
-    });
+    };
   });
 
   app.post<{
@@ -72,39 +74,53 @@ export function buildServer() {
       capabilityId: string;
     };
   }>("/capabilities/:capabilityId/revoke", async (request, reply) => {
-    const capability = capabilityStore.revoke(request.params.capabilityId);
+    const revoked = capabilityStore.revoke(request.params.capabilityId);
 
-    if (!capability) {
-      return reply.status(404).send({
-        error: "CAPABILITY_NOT_FOUND",
+    if (!revoked) {
+      return reply.code(404).send({
+        error: "CAPABILITY_NOT_FOUND_OR_INACTIVE",
       });
     }
 
-    return reply.send({
-      message: "Capability revoked",
-      capability,
-    });
+    return {
+      capabilityId: request.params.capabilityId,
+      status: "REVOKED",
+    };
   });
 
   app.post("/evaluate", async (request, reply) => {
+    const requestId = randomUUID();
     const validation = validateIntent(request.body);
 
     if (!validation.success) {
-      return reply.status(400).send({
-        error: "INVALID_INTENT",
-        details: validation.errors,
+      return reply.code(400).send({
+        requestId,
+        allowed: false,
+        code: "INVALID_INTENT",
+        reason: "Intent validation failed",
+        details: validation.error.flatten(),
       });
     }
 
     const intent = validation.data;
-
     const capability = capabilityStore.get(intent.capabilityId);
 
     if (!capability) {
-      return reply.status(404).send({
+      const result = {
         allowed: false,
-        code: "CAPABILITY_NOT_FOUND",
+        code: "CAPABILITY_NOT_FOUND" as const,
         reason: "Capability does not exist",
+      };
+
+      auditStore.write({
+        requestId,
+        intent,
+        result,
+      });
+
+      return reply.code(403).send({
+        requestId,
+        ...result,
       });
     }
 
@@ -116,19 +132,33 @@ export function buildServer() {
 
     const result = policyEngine.evaluate(capability, intent, isReplay);
 
-    if (result.allowed) {
-      replayStore.markProcessed(
-        intent.capabilityId,
-        intent.agentId,
-        intent.nonce,
-      );
+    auditStore.write({
+      requestId,
+      intent,
+      result,
+    });
 
-      if (capability.usage === "SINGLE_USE") {
-        capabilityStore.consume(capability.capabilityId);
-      }
+    if (!result.allowed) {
+      return reply.code(403).send({
+        requestId,
+        ...result,
+      });
     }
 
-    return reply.send(result);
+    replayStore.markProcessed(
+      intent.capabilityId,
+      intent.agentId,
+      intent.nonce,
+    );
+
+    if (capability.usage === "SINGLE_USE") {
+      capabilityStore.consume(capability.capabilityId);
+    }
+
+    return reply.code(200).send({
+      requestId,
+      ...result,
+    });
   });
 
   return app;

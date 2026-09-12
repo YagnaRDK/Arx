@@ -1,7 +1,24 @@
-export class ReplayStore {
-  private processedRequests = new Set<string>();
+import { db } from "../db/database";
 
-  private getRequestKey(
+export class ReplayStore {
+  private readonly existsStatement = db.prepare(`
+    SELECT replay_key
+    FROM processed_intents
+    WHERE replay_key = ?
+  `);
+
+  private readonly insertStatement = db.prepare(`
+    INSERT INTO processed_intents (
+      replay_key,
+      capability_id,
+      agent_id,
+      nonce,
+      processed_at
+    )
+    VALUES (?, ?, ?, ?, ?)
+  `);
+
+  private createReplayKey(
     capabilityId: string,
     agentId: string,
     nonce: number,
@@ -14,14 +31,25 @@ export class ReplayStore {
     agentId: string,
     nonce: number,
   ): boolean {
-    const key = this.getRequestKey(capabilityId, agentId, nonce);
+    const replayKey = this.createReplayKey(capabilityId, agentId, nonce);
 
-    return this.processedRequests.has(key);
+    const result = this.existsStatement.get(replayKey) as
+      | { replay_key: string }
+      | null
+      | undefined;
+
+    return Boolean(result);
   }
 
   markProcessed(capabilityId: string, agentId: string, nonce: number): void {
-    const key = this.getRequestKey(capabilityId, agentId, nonce);
+    const replayKey = this.createReplayKey(capabilityId, agentId, nonce);
 
-    this.processedRequests.add(key);
+    this.insertStatement.run(
+      replayKey,
+      capabilityId,
+      agentId,
+      nonce,
+      Math.floor(Date.now() / 1000),
+    );
   }
 }

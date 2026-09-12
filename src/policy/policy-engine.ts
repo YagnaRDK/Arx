@@ -1,48 +1,19 @@
 import type { Capability } from "../types/capability";
+import type { EvaluationResult } from "../types/evaluation";
 import type { Intent } from "../types/intent";
-
-export type PolicyCode =
-  | "POLICY_APPROVED"
-  | "CAPABILITY_ID_MISMATCH"
-  | "CAPABILITY_EXPIRED"
-  | "CAPABILITY_REVOKED"
-  | "CAPABILITY_CONSUMED"
-  | "CAPABILITY_INACTIVE"
-  | "AGENT_MISMATCH"
-  | "ACTION_NOT_ALLOWED"
-  | "PROTOCOL_NOT_ALLOWED"
-  | "CHAIN_NOT_ALLOWED"
-  | "INPUT_TOKEN_NOT_ALLOWED"
-  | "OUTPUT_TOKEN_NOT_ALLOWED"
-  | "AMOUNT_EXCEEDED"
-  | "SLIPPAGE_EXCEEDED"
-  | "INVALID_NONCE"
-  | "REPLAY_DETECTED";
-
-export type PolicyResult =
-  | {
-      allowed: true;
-      code: "POLICY_APPROVED";
-      reason: string;
-    }
-  | {
-      allowed: false;
-      code: Exclude<PolicyCode, "POLICY_APPROVED">;
-      reason: string;
-    };
 
 export class PolicyEngine {
   evaluate(
     capability: Capability,
     intent: Intent,
-    isReplay: boolean = false,
+    isReplay: boolean,
     currentTime: number = Math.floor(Date.now() / 1000),
-  ): PolicyResult {
-    if (intent.capabilityId !== capability.capabilityId) {
+  ): EvaluationResult {
+    if (capability.capabilityId !== intent.capabilityId) {
       return {
         allowed: false,
         code: "CAPABILITY_ID_MISMATCH",
-        reason: "Intent references a different capability",
+        reason: "Intent capability ID does not match the supplied capability",
       };
     }
 
@@ -58,7 +29,7 @@ export class PolicyEngine {
       return {
         allowed: false,
         code: "CAPABILITY_CONSUMED",
-        reason: "Capability has already been consumed",
+        reason: "Single-use capability has already been consumed",
       };
     }
 
@@ -66,7 +37,7 @@ export class PolicyEngine {
       return {
         allowed: false,
         code: "CAPABILITY_INACTIVE",
-        reason: `Capability is ${capability.status}`,
+        reason: "Capability is not active",
       };
     }
 
@@ -78,7 +49,7 @@ export class PolicyEngine {
       };
     }
 
-    if (intent.agentId !== capability.agentId) {
+    if (capability.agentId !== intent.agentId) {
       return {
         allowed: false,
         code: "AGENT_MISMATCH",
@@ -114,7 +85,7 @@ export class PolicyEngine {
       return {
         allowed: false,
         code: "INPUT_TOKEN_NOT_ALLOWED",
-        reason: "Requested input token is not allowed",
+        reason: "Input token is not allowed",
       };
     }
 
@@ -122,7 +93,7 @@ export class PolicyEngine {
       return {
         allowed: false,
         code: "OUTPUT_TOKEN_NOT_ALLOWED",
-        reason: "Requested output token is not allowed",
+        reason: "Output token is not allowed",
       };
     }
 
@@ -130,7 +101,7 @@ export class PolicyEngine {
       return {
         allowed: false,
         code: "AMOUNT_EXCEEDED",
-        reason: "Transaction amount exceeds capability limit",
+        reason: "Intent amount exceeds capability limit",
       };
     }
 
@@ -138,15 +109,15 @@ export class PolicyEngine {
       return {
         allowed: false,
         code: "SLIPPAGE_EXCEEDED",
-        reason: "Slippage exceeds capability limit",
+        reason: "Intent slippage exceeds capability limit",
       };
     }
 
-    if (intent.nonce !== capability.nonce) {
+    if (intent.nonce < capability.nonce) {
       return {
         allowed: false,
         code: "INVALID_NONCE",
-        reason: "Intent nonce does not match capability nonce",
+        reason: "Intent nonce is lower than the capability nonce",
       };
     }
 
@@ -154,14 +125,14 @@ export class PolicyEngine {
       return {
         allowed: false,
         code: "REPLAY_DETECTED",
-        reason: "This intent has already been processed",
+        reason: "Intent has already been processed",
       };
     }
 
     return {
       allowed: true,
       code: "POLICY_APPROVED",
-      reason: "Intent satisfies all policy rules",
+      reason: "Intent approved by capability policy",
     };
   }
 }
