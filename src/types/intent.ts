@@ -16,6 +16,8 @@ export const IntentSchema = z.object({
 
   nonce: z.number().int().nonnegative(),
   timestamp: z.number().int().positive(),
+
+  transaction: z.unknown().optional(),
 });
 
 export type Intent = z.infer<typeof IntentSchema>;

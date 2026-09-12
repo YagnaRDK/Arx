@@ -16,7 +16,9 @@ export type PolicyCode =
   | "SLIPPAGE_EXCEEDED"
   | "INVALID_NONCE"
   | "REPLAY_DETECTED"
-  | "INVALID_INTENT";
+  | "INVALID_INTENT"
+  | "INVALID_TRANSACTION"
+  | "TRANSACTION_NOT_ALLOWED";
 
 export type EvaluationResult = {
   allowed: boolean;

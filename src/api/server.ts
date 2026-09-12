@@ -3,10 +3,11 @@ import { randomUUID } from "node:crypto";
 
 import { CapabilityStore } from "../storage/capability-store";
 import { ReplayStore } from "../storage/replay-store";
-
-import { validateCapability, validateIntent } from "../policy/validators";
 import { AuditStore } from "../storage/audit-store";
 import { PolicyEngine } from "../policy/policy-engine";
+import { validateCapability, validateIntent } from "../policy/validators";
+import { TransactionNormalizer } from "../normalization/transaction-normalizer";
+import { TransactionFirewall } from "../firewall/transaction-firewall";
 
 export function buildServer() {
   const app = Fastify({
@@ -17,12 +18,14 @@ export function buildServer() {
   const replayStore = new ReplayStore();
   const auditStore = new AuditStore();
   const policyEngine = new PolicyEngine();
+  const transactionNormalizer = new TransactionNormalizer();
+  const transactionFirewall = new TransactionFirewall();
 
   app.get("/", async () => {
     return {
       service: "Arx Policy Engine",
       status: "operational",
-      version: "0.2.0",
+      version: "0.3.0",
     };
   });
 
@@ -158,6 +161,150 @@ export function buildServer() {
     return reply.code(200).send({
       requestId,
       ...result,
+    });
+  });
+
+  app.post("/firewall/submit", async (request, reply) => {
+    const requestId = randomUUID();
+    const validation = validateIntent(request.body);
+
+    if (!validation.success) {
+      return reply.code(400).send({
+        requestId,
+        allowed: false,
+        code: "INVALID_INTENT",
+        reason: "Intent validation failed",
+        details: validation.error.flatten(),
+      });
+    }
+
+    const intent = validation.data;
+
+    if (!intent.transaction) {
+      return reply.code(400).send({
+        requestId,
+        allowed: false,
+        code: "INVALID_TRANSACTION",
+        reason: "A transaction is required for firewall submission",
+      });
+    }
+
+    const capability = capabilityStore.get(intent.capabilityId);
+
+    if (!capability) {
+      const result = {
+        allowed: false,
+        code: "CAPABILITY_NOT_FOUND" as const,
+        reason: "Capability does not exist",
+      };
+
+      auditStore.write({
+        requestId,
+        intent,
+        result,
+      });
+
+      return reply.code(403).send({
+        requestId,
+        ...result,
+      });
+    }
+
+    const isReplay = replayStore.hasBeenProcessed(
+      intent.capabilityId,
+      intent.agentId,
+      intent.nonce,
+    );
+
+    const policyResult = policyEngine.evaluate(capability, intent, isReplay);
+
+    if (!policyResult.allowed) {
+      auditStore.write({
+        requestId,
+        intent,
+        result: policyResult,
+      });
+
+      return reply.code(403).send({
+        requestId,
+        ...policyResult,
+      });
+    }
+
+    let normalizedTransaction;
+
+    try {
+      normalizedTransaction = transactionNormalizer.normalize({
+        agentId: intent.agentId,
+        capabilityId: intent.capabilityId,
+        transaction: intent.transaction,
+      });
+    } catch {
+      const result = {
+        allowed: false,
+        code: "INVALID_TRANSACTION" as const,
+        reason: "Transaction normalization failed",
+      };
+
+      auditStore.write({
+        requestId,
+        intent,
+        result,
+      });
+
+      return reply.code(400).send({
+        requestId,
+        ...result,
+      });
+    }
+
+    if (normalizedTransaction.transaction.chainId !== intent.chainId) {
+      const result = {
+        allowed: false,
+        code: "TRANSACTION_NOT_ALLOWED" as const,
+        reason: "Transaction chain does not match intent chain",
+      };
+
+      auditStore.write({
+        requestId,
+        intent,
+        result,
+      });
+
+      return reply.code(403).send({
+        requestId,
+        ...result,
+      });
+    }
+
+    const firewallDecision = transactionFirewall.process(
+      normalizedTransaction,
+      policyResult,
+    );
+
+    if (!firewallDecision.allowed) {
+      return reply.code(403).send({
+        requestId,
+        ...firewallDecision.result,
+      });
+    }
+
+    replayStore.markProcessed(
+      intent.capabilityId,
+      intent.agentId,
+      intent.nonce,
+    );
+
+    if (capability.usage === "SINGLE_USE") {
+      capabilityStore.consume(capability.capabilityId);
+    }
+
+    return reply.code(200).send({
+      requestId,
+      status: "READY_FOR_SIGNING",
+      transactionId: normalizedTransaction.transactionId,
+      policy: policyResult,
+      transaction: normalizedTransaction.transaction,
     });
   });
 
