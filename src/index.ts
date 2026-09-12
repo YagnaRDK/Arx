@@ -1,51 +1,17 @@
-import { PolicyEngine } from "./policy/policy-engine";
-import type { Capability } from "./types/capability";
-import type { Intent } from "./types/intent";
+import { buildServer } from "./api/server";
 
-const capability: Capability = {
-  capabilityId: "cap-001",
-  agentId: "agent-001",
+const app = buildServer();
 
-  allowedActions: ["SWAP"],
-  allowedProtocols: ["UNISWAP"],
-  allowedChains: [11155111],
+const port = Number(process.env.PORT ?? 3000);
 
-  allowedTokens: {
-    input: ["USDC"],
-    output: ["WETH"],
-  },
+try {
+  await app.listen({
+    port,
+    host: "0.0.0.0",
+  });
 
-  maxAmountUsd: 100,
-  maxSlippageBps: 200,
-
-  expiresAt: 2000000000,
-  nonce: 1,
-
-  status: "ACTIVE",
-  usage: "REUSABLE",
-};
-
-const intent: Intent = {
-  capabilityId: "cap-001",
-  agentId: "agent-001",
-
-  action: "SWAP",
-  protocol: "UNISWAP",
-  chainId: 11155111,
-
-  inputToken: "USDC",
-  outputToken: "WETH",
-
-  amountUsd: 50,
-  slippageBps: 100,
-
-  nonce: 1,
-  timestamp: Math.floor(Date.now() / 1000),
-};
-
-const engine = new PolicyEngine();
-
-const result = engine.evaluate(capability, intent);
-
-console.log("Policy Decision:");
-console.log(result);
+  console.log(`Arx Policy Engine running on port ${port}`);
+} catch (error) {
+  app.log.error(error);
+  process.exit(1);
+}
