@@ -26,7 +26,7 @@ import { UINT256_MAX, flattenCall } from "./decode-calldata";
  * canonical spelling, but `2^128` base units exceeds the entire supply of every
  * real token, so a slightly smaller constant must not evade the check.
  */
-const EFFECTIVELY_UNLIMITED = 2n ** 128n;
+export const EFFECTIVELY_UNLIMITED = 2n ** 128n;
 
 /** How far an allowance may exceed the value it is supposed to enable. */
 const EXCESS_MULTIPLE = 10n;

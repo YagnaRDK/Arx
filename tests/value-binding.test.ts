@@ -552,58 +552,68 @@ describe("value binding: allowance sizing", () => {
     expect(decision.decision).toBe("ESCALATE");
   });
 
-  it.failing(
-    "KNOWN DEFECT: a bare approve is never allowance-priced, so the far-excess rule cannot fire",
-    async () => {
-      /*
-       * `checkValueBinding` takes its `nothingToPrice(...)` early return before
-       * it ever prices `extraction.largestAllowance`. A bare `approve` moves no
-       * native value and no token amount, so `components` is empty and that
-       * return is *always* taken for the normal shape of an approval.
-       *
-       * The consequence: `allowanceUsd` stays undefined, which makes both the
-       * far-excess ESCALATE in `approve-semantics.ts` and the
-       * APPROVAL_FAR_EXCEEDS_DECLARED risk signal unreachable. The only
-       * surviving guard is the 2^128 block — so an allowance of 2^128-1 USDC
-       * base units, roughly $3.4e32 against a declared $1 action, is ALLOWed
-       * with no finding and no risk signal at all.
-       *
-       * Marked `it.failing` so the defect is recorded in the suite without
-       * leaving it red. This asserts the behaviour Arx should have; it will pass
-       * (and must then be un-marked) once `value-binding.ts` prices the largest
-       * allowance before that early return.
-       */
-      const decision = await inspect({
-        oracle: freshOracle() as never,
-        capability: approveCapability,
-        transaction: buildCall(
-          USDC,
-          erc20("approve", [PAYEE, EFFECTIVELY_UNLIMITED - 1n]),
-        ),
-        intent: buildIntent({ amountUsd: 1, action: "APPROVE" }),
-      });
-
-      expect(decision.decision).not.toBe("ALLOW");
-    },
-  );
-
-  it("records what that defect does today, so the code and the report agree", async () => {
+  it("prices a bare approve's allowance, so a huge grant cannot pass as $0", async () => {
+    /*
+     * This was a real defect, found by attacking a running server and fixed.
+     *
+     * `checkValueBinding` took its `nothingToPrice(...)` early return before it
+     * ever priced `extraction.largestAllowance`. A bare `approve` moves no
+     * native value and no token amount, so `components` was empty and that
+     * return was taken for the normal shape of an approval — leaving
+     * `allowanceUsd` undefined, which made the far-excess escalation and the
+     * APPROVAL_FAR_EXCEEDS_DECLARED risk signal unreachable.
+     *
+     * The consequence was that `approve(spender, 100_000_000 USDC)` to an
+     * allowlisted spender was ALLOWed against a capability whose ceiling was
+     * $500, because the transaction itself moved nothing. The guard now covers
+     * the allowance, and the capability's USD ceiling applies to the authority
+     * being granted rather than only to the value being moved.
+     */
     const decision = await inspect({
       oracle: freshOracle() as never,
       capability: approveCapability,
       transaction: buildCall(
         USDC,
+        // Just under the 2^128 unlimited threshold, so it is priced rather than
+        // caught by the separate unlimited-approval block.
         erc20("approve", [PAYEE, EFFECTIVELY_UNLIMITED - 1n]),
       ),
       intent: buildIntent({ amountUsd: 1, action: "APPROVE" }),
     });
 
-    // Not an endorsement: this is the observed gap, asserted so that fixing
-    // `value-binding.ts` makes this test fail loudly and forces both it and the
-    // `it.failing` case above to be updated together.
+    expect(decision.decision).not.toBe("ALLOW");
+  });
+
+  it("applies the capability's USD ceiling to a standing allowance", async () => {
+    // An allowance is a ceiling on future payments. Comparing it to the same
+    // ceiling the operator set is the question that matters, and it is the one
+    // that was never asked.
+    const decision = await inspect({
+      oracle: freshOracle() as never,
+      capability: approveCapability,
+      transaction: buildCall(
+        USDC,
+        // $10,000 of USDC against a capability far below that.
+        erc20("approve", [PAYEE, 10_000_000_000n]),
+      ),
+      intent: buildIntent({ amountUsd: 10_000, action: "APPROVE" }),
+    });
+
+    expect(decision.decision).not.toBe("ALLOW");
+    expect(codesOf(decision, "BLOCK")).toContain("AMOUNT_EXCEEDED");
+  });
+
+  it("still permits an honest approval inside the ceiling", async () => {
+    // The fix must not make every approval a denial: an allowance that matches
+    // the declaration and sits inside the ceiling is exactly what the
+    // capability authorized.
+    const decision = await inspect({
+      oracle: freshOracle() as never,
+      capability: approveCapability,
+      transaction: buildCall(USDC, erc20("approve", [PAYEE, 40_000_000n])),
+      intent: buildIntent({ amountUsd: 40, action: "APPROVE" }),
+    });
+
     expect(decision.decision).toBe("ALLOW");
-    expect(decision.riskSignals.map((signal) => signal.id)).not.toContain(
-      "APPROVAL_FAR_EXCEEDS_DECLARED",
-    );
   });
 });
