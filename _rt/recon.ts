@@ -1,0 +1,18 @@
+import { app, adminPost, agentReq } from "./inject-lib";
+import { cap, intent } from "./lib";
+const regV = await adminPost("/agents", { agentId: "agent-v" });
+const regX = await adminPost("/agents", { agentId: "agent-x" });
+const sV = regV.body.secret, sX = regX.body.secret;
+const cV = cap({ agentId: "agent-v" });
+await adminPost("/capabilities", cV);
+const i: any = intent(cV.capabilityId, { to: "0x1111111111111111111111111111111111111111", value: "1000000000000000" }, { amountUsd: 3.2, nonce: 11 });
+i.agentId = "agent-v";
+const a = await agentReq("agent-v", sV, "POST", "/approvals", i);
+const id = a.body.approval.approvalId;
+const one = await agentReq("agent-x", sX, "GET", `/approvals/${id}`);
+console.log("APPROVAL ROW:", JSON.stringify(one.body.approval, null, 1));
+console.log("TRAIL EVENT TYPES:", one.body.trail?.map((t:any)=>t.eventType));
+const fw = one.body.trail?.find((t:any)=>t.eventType==="FIREWALL_CHECKED");
+console.log("FIREWALL payload keys:", fw && Object.keys(JSON.parse(typeof fw.payload==="string"?fw.payload:JSON.stringify(fw.payload))));
+console.log(JSON.stringify(fw?.payload)?.slice(0, 1200));
+await app.close();

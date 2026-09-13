@@ -121,6 +121,26 @@ function assessConformance(
 
   if (expected === "ALLOW") {
     if (observed === "ALLOW") {
+      /*
+       * For a replay scenario, ALLOW on its own proves nothing: the safe
+       * outcome and the dangerous one are indistinguishable from the decision
+       * string. What separates them is whether a second authorization was
+       * created, so that is what gets asserted.
+       */
+      if (scenario.expectIdempotentReplay === true) {
+        const sameApproval =
+          result.firstApprovalId !== undefined &&
+          result.approvalId === result.firstApprovalId;
+
+        return {
+          ...base,
+          status: sameApproval ? "AS_EXPECTED" : "CONTROL_GAP",
+          note: sameApproval
+            ? `Replayed the original decision: both submissions returned approval ${result.approvalId}, so only one authorization exists and the injected "pay it again" cannot pay again.`
+            : `The replay produced a SECOND authorization (${result.firstApprovalId} then ${result.approvalId}). Idempotency is not holding, and the payment could be made twice.`,
+        };
+      }
+
       return {
         ...base,
         status: "AS_EXPECTED",
@@ -378,5 +398,14 @@ async function main(): Promise<number> {
 }
 
 if (import.meta.main) {
-  process.exit(await main());
+  /*
+   * `process.exitCode`, not `process.exit()`.
+   *
+   * `process.exit()` terminates immediately, which can truncate buffered
+   * stdout — and the summary table is the last thing written, so a failing run
+   * could exit with the right code and no visible explanation of what failed.
+   * Setting the code lets the process drain and exit on its own, which is what
+   * `scripts/demo.ts` already did.
+   */
+  process.exitCode = await main();
 }

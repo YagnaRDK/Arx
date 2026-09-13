@@ -96,6 +96,14 @@ export type AgentRunResult = {
   signature?: Record<string, unknown>;
   reasoningMode: "scripted" | "live-llm";
   model?: string;
+  /**
+   * The approval id from the first submission of a resubmit scenario.
+   *
+   * Present so a replay can be judged on the property that matters — whether a
+   * second authorization came into existence — rather than on the decision
+   * string alone, which is identical either way.
+   */
+  firstApprovalId?: string;
 };
 
 /** A one-screen rendering of the grant, for the model and the transcript. */
@@ -505,8 +513,14 @@ export async function runPaymentAgent(input: {
   );
 
   let proposal = await toolset.proposeTransaction(intent);
+  let firstApprovalId: string | undefined;
 
   if (scenario.resubmit) {
+    firstApprovalId =
+      typeof proposal.data.approvalId === "string"
+        ? proposal.data.approvalId
+        : undefined;
+
     transcript.add(
       "VERDICT",
       "First submission",
@@ -514,6 +528,7 @@ export async function runPaymentAgent(input: {
       {
         decision: proposal.data.decision,
         code: proposal.data.code,
+        approvalId: firstApprovalId,
       },
     );
 
@@ -633,5 +648,6 @@ export async function runPaymentAgent(input: {
     signature,
     reasoningMode,
     model: model ?? (input.mode === "live-llm" ? liveModel() : undefined),
+    firstApprovalId,
   };
 }

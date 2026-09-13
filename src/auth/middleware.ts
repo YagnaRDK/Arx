@@ -138,7 +138,54 @@ export function createAuthMiddleware(
     };
   }
 
-  return { requireAdmin, requireAgent };
+  /**
+   * Read plane.
+   *
+   * Arx's read surface is not harmless. `GET /capabilities` is a map of exactly
+   * what each agent may do — every allowlisted recipient and every limit — which
+   * tells an attacker which counterparty to impersonate and which ceiling to
+   * stay under. `GET /audit` carries counterparties and amounts. `GET /agents`
+   * enumerates identities, and `GET /broker/status` names the sealed secrets.
+   *
+   * None of that permits an action, so this is disclosure rather than
+   * escalation — but leaving it open in a deployment that has explicitly been
+   * locked down would be wrong. Either credential satisfies it: an operator
+   * reading the cockpit presents the admin token, an agent presents its HMAC.
+   *
+   * Gated on the same `env.requireAgentAuth` switch as the data plane, so the
+   * default demo posture stays open and one flag locks the whole surface.
+   */
+  function requireReader(options: { enforce?: boolean } = {}) {
+    const enforce = options.enforce ?? env.requireAgentAuth;
+
+    return async function readerPreHandler(
+      request: FastifyRequest,
+      _reply: FastifyReply,
+    ): Promise<void> {
+      if (!enforce) {
+        return;
+      }
+
+      const headers = request.headers as Record<string, unknown>;
+
+      if (AgentAuthenticator.hasCredentials(headers)) {
+        request.arxAgent = agentAuthenticator.authenticate({
+          method: request.method,
+          path: request.url,
+          headers,
+          body: request.body,
+        });
+
+        return;
+      }
+
+      // Falls through to the admin token, which throws its own ArxError with a
+      // specific code if absent or wrong.
+      request.arxAdmin = adminAuthenticator.authenticate(headers);
+    };
+  }
+
+  return { requireAdmin, requireAgent, requireReader };
 }
 
 /**

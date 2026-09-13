@@ -1,0 +1,34 @@
+# SHA-256 digests of the LedgerHQ/app-ethereum release artifacts Arx runs on
+# Speculos. `scripts/speculos-up.sh` verifies every download against this file
+# and refuses to start the emulator on a mismatch.
+#
+# Why pin at all: the binary is what actually signs in SIGNER_MODE=speculos, so
+# "the app I ran" has to be a checkable statement rather than "whatever the URL
+# served today". A GitHub release asset can be replaced by anyone who can push
+# a release.
+#
+# Provenance
+#   source   https://github.com/LedgerHQ/app-ethereum/releases/tag/1.22.3
+#   assets   app-1.22.3-{nanos2,nanox,flex,stax,apex_p}.elf
+#   licence  Apache-2.0 (LedgerHQ/app-ethereum) — the binaries are redistributed
+#            by Ledger under that licence and are NOT vendored into this repo;
+#            they are fetched at run time and gitignored.
+#   recorded 2026-09-12, by downloading each asset and running
+#            `shasum -a 256`. Each file is `ELF 32-bit LSB executable, ARM,
+#            EABI5 version 1 (SYSV), statically linked, not stripped`.
+#
+# Model-name mapping (Speculos --model  ->  release asset target):
+#   nanosp -> nanos2      nanox -> nanox      flex -> flex
+#   stax   -> stax        apex_p -> apex_p
+#
+# Format is "<digest>  <filename>". Only the asset for your own SPECULOS_MODEL
+# will normally be present, so check it with --ignore-missing:
+#   cd data/ledger-apps && shasum -a 256 -c --ignore-missing CHECKSUMS.sha256
+# A bare `-c` reports the four absent models as failures, which is a missing
+# file rather than a bad digest. There is no blank line below: shasum counts one
+# as an improperly formatted entry.
+d8631ab43961928851e66175bef6d0157e5c516389b8b61bdb3c239a8125944e  app-1.22.3-nanos2.elf
+47705998a0419df75959f46faf2c4a214846f61943fd15d3708b92caf2a3559f  app-1.22.3-nanox.elf
+88ce93fe2b982c05f37aef108c1ea40f251ae394c25bb8232eb6a8adb3feaa5d  app-1.22.3-flex.elf
+80703bf391b6e0ee9fca7e042b8f04b9b61068330111030c8458639e94e774fd  app-1.22.3-stax.elf
+d55b73fa82a1ab8b63d9d57a6e4993e6236b8eb7f6dce78c5437e225e783b88d  app-1.22.3-apex_p.elf

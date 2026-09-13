@@ -74,6 +74,17 @@ export type Scenario = {
   control: string;
   /** Submit the same intent twice, to exercise replay protection. */
   resubmit?: boolean;
+  /**
+   * The resubmission must not create a second authorization.
+   *
+   * Distinct from `expect.decision`, because the safe outcome here is not a
+   * denial. An identical intent carrying the same `intentId` is idempotent: Arx
+   * replays the original decision and creates no second approval, so the
+   * injected "pay it again" cannot pay again. A denial would look stricter and
+   * be worse — it would break legitimate network retries while adding no
+   * protection.
+   */
+  expectIdempotentReplay?: boolean;
 };
 
 function injection(id: string): InjectionPayload {
@@ -193,11 +204,25 @@ export const SCENARIOS: readonly Scenario[] = [
       "The recipient, amount and every limit are legitimate. Replaying the authorisation would simply pay twice.",
     injection: injection("email-replay"),
     resubmit: true,
+    /*
+     * The correct outcome is an idempotent replay, not a refusal.
+     *
+     * This scenario originally expected DENY, and the demo duly reported a
+     * control gap when Arx answered ALLOW. Inspecting the database settled it:
+     * exactly one approval existed, and the second response was the first
+     * decision replayed. That is the stronger behaviour — no double payment is
+     * possible, and a retried request still works — so the expectation was
+     * wrong, not the control.
+     *
+     * What is asserted instead is the property that actually matters: no second
+     * authorization came into existence.
+     */
     expect: {
-      decision: "DENY",
-      acceptableCodes: ["REPLAY_DETECTED", "NONCE_REUSED", "INTENT_ID_CONFLICT"],
+      decision: "ALLOW",
+      acceptableCodes: ["POLICY_APPROVED"],
     },
-    control: "nonce replay protection",
+    expectIdempotentReplay: true,
+    control: "intent idempotency (one authorization per intentId)",
   },
 ] as const;
 

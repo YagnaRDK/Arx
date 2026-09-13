@@ -867,7 +867,14 @@
       init.body = JSON.stringify(options.body);
     }
 
-    if (options && options.admin && config.token) {
+    // Sent on every request when configured, not only on writes.
+    //
+    // Arx authenticates its read surface too once ARX_REQUIRE_AGENT_AUTH is
+    // set — GET /capabilities is a map of what each agent may do, and
+    // GET /audit carries counterparties and amounts — so a cockpit that only
+    // authenticated its writes would show empty panels against a locked-down
+    // deployment. An open deployment ignores the header.
+    if (config.token) {
       init.headers.authorization = `Bearer ${config.token}`;
       init.headers["x-arx-admin-token"] = config.token;
     }

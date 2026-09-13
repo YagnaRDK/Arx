@@ -136,11 +136,22 @@ export type CreatePriceOracleOptions = CompositePriceOracleOptions & {
   /** Defaults to `env.priceOracleMode`. */
   mode?: "static" | "chainlink";
   /**
-   * Whether the static table may answer when Chainlink cannot. Left on by
-   * default because a labelled offline quote is more useful than no
-   * authorization at all, and every quote carries `source: "static-table"` so
-   * the substitution is visible in the response and the audit record. Turn it
-   * off to require live data.
+   * Whether the static table may answer when Chainlink cannot.
+   *
+   * Defaults to **false in `chainlink` mode**. An operator who configures a
+   * live oracle and silently receives a hardcoded table has a fail-open on
+   * value binding: if the real price has moved, a transaction the ceiling
+   * should have blocked is priced against a stale constant and passes. The
+   * `source` field makes that detectable but nothing acts on it.
+   *
+   * Reporting the price as unavailable is the better failure, because it is not
+   * a denial — `checkValueBinding` escalates an unpriced transfer to a human
+   * rather than refusing it. So the choice is not "labelled guess versus no
+   * authorization", it is "labelled guess versus ask a person", and for a
+   * control whose whole purpose is catching a false declaration, asking is
+   * right.
+   *
+   * Set it explicitly to opt back into the substitution.
    */
   staticFallback?: boolean;
 };
@@ -148,9 +159,13 @@ export type CreatePriceOracleOptions = CompositePriceOracleOptions & {
 /**
  * Builds the oracle the server should inject into the firewall.
  *
- * In `chainlink` mode Chainlink is consulted first and the static table is the
- * labelled fallback. In `static` mode only the table is used — no RPC is
- * touched, so a clean clone runs the full demo offline.
+ * In `static` mode only the table is used — no RPC is touched, so a clean clone
+ * runs the full demo offline, and every quote is labelled `static-table`.
+ *
+ * In `chainlink` mode only Chainlink answers unless `staticFallback` is
+ * explicitly enabled. An unreachable feed then yields `UNAVAILABLE`, which
+ * escalates the transaction to a human instead of quietly pricing it against a
+ * constant.
  */
 export function createPriceOracle(
   options: CreatePriceOracleOptions = {},
@@ -167,7 +182,11 @@ export function createPriceOracle(
     );
   }
 
-  if (mode === "static" || (options.staticFallback ?? true)) {
+  // In chainlink mode the substitution must be opted into, not inherited.
+  const allowStatic =
+    mode === "static" ? true : (options.staticFallback ?? false);
+
+  if (allowStatic) {
     adapters.push(new StaticPriceOracle({ now: options.now }));
   }
 

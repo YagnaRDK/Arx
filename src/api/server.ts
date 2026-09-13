@@ -231,7 +231,7 @@ export async function buildServer() {
     };
   });
 
-  app.get("/integrations", async (request) => {
+  app.get("/integrations", { preHandler: auth.requireReader() }, async (request) => {
     const brokerStatus = await broker.status();
     const query = request.query as { probe?: string };
 
@@ -341,7 +341,7 @@ export async function buildServer() {
     },
   );
 
-  app.get("/capabilities", async (request) => {
+  app.get("/capabilities", { preHandler: auth.requireReader() }, async (request) => {
     const query = request.query as { agentId?: string; limit?: string };
     const limit = Math.min(Number(query.limit ?? 100) || 100, 500);
 
@@ -688,11 +688,11 @@ export async function buildServer() {
   );
 
   /** The escalation queue, which is what the human approval UI reads. */
-  app.get("/approvals/pending", async () => ({
+  app.get("/approvals/pending", { preHandler: auth.requireReader() }, async () => ({
     approvals: humanApprovalQueue.listPending(),
   }));
 
-  app.get("/approvals", async (request) => {
+  app.get("/approvals", { preHandler: auth.requireReader() }, async (request) => {
     const query = request.query as { status?: string; limit?: string };
     const limit = Math.min(Number(query.limit ?? 100) || 100, 500);
 
@@ -709,6 +709,7 @@ export async function buildServer() {
 
   app.get<{ Params: { approvalId: string } }>(
     "/approvals/:approvalId",
+    { preHandler: auth.requireReader() },
     async (request, reply) => {
       const approval = approvalStore.get(request.params.approvalId);
 
@@ -833,7 +834,7 @@ export async function buildServer() {
 
       if (!verification.valid) {
         auditStore.append({
-          eventType: "SIGNING_FAILED",
+          eventType: "SIGNING_REFUSED",
           requestId,
           approvalId: approval.approvalId,
           agentId: approval.agentId,
@@ -866,7 +867,7 @@ export async function buildServer() {
         const code = capability ? "CAPABILITY_REVOKED" : "CAPABILITY_NOT_FOUND";
 
         auditStore.append({
-          eventType: "SIGNING_FAILED",
+          eventType: "SIGNING_REFUSED",
           requestId,
           approvalId: approval.approvalId,
           decision: "DENY",
@@ -1013,14 +1014,14 @@ export async function buildServer() {
   );
 
   // ── Audit ─────────────────────────────────────────────────────────────────
-  app.get("/audit", async (request) => {
+  app.get("/audit", { preHandler: auth.requireReader() }, async (request) => {
     const query = request.query as { limit?: string };
     const limit = Math.min(Number(query.limit ?? 100) || 100, 1000);
 
     return { head: auditStore.head(), entries: auditStore.list(limit) };
   });
 
-  app.get("/audit/verify", async () => {
+  app.get("/audit/verify", { preHandler: auth.requireReader() }, async () => {
     const result = auditStore.verifyChain();
 
     return {
@@ -1033,6 +1034,7 @@ export async function buildServer() {
 
   app.get<{ Params: { requestId: string } }>(
     "/audit/:requestId",
+    { preHandler: auth.requireReader() },
     async (request) => ({
       requestId: request.params.requestId,
       trail: auditStore.byRequest(request.params.requestId),
@@ -1040,7 +1042,11 @@ export async function buildServer() {
   );
 
   // ── Broker (control plane) ────────────────────────────────────────────────
-  app.get("/broker/status", async () => broker.status());
+  app.get(
+    "/broker/status",
+    { preHandler: auth.requireReader() },
+    async () => broker.status(),
+  );
 
   app.post(
     "/broker/secrets",
@@ -1126,7 +1132,11 @@ export async function buildServer() {
     },
   );
 
-  app.get("/agents", async () => ({ agents: agentStore.list() }));
+  app.get(
+    "/agents",
+    { preHandler: auth.requireReader() },
+    async () => ({ agents: agentStore.list() }),
+  );
 
   app.post<{ Params: { agentId: string } }>(
     "/agents/:agentId/enable",

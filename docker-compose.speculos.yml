@@ -1,51 +1,88 @@
 # Speculos — the Ledger device emulator — for the Arx signing boundary.
 #
-# Start it with `scripts/speculos-up.sh`, which also fetches the Ethereum app
-# binary this file expects at ./data/ledger-apps/app-ethereum.elf.
+# Start it with `scripts/speculos-up.sh`, which fetches the Ethereum app binary,
+# verifies its SHA-256 against data/ledger-apps/CHECKSUMS.sha256, and passes the
+# filename in as ARX_ETH_APP_ELF. Running `docker compose -f this-file up`
+# directly works too, but then nothing has checked which binary you are booting.
+#
+# The image ships NO Ethereum app. Its apps/ directory holds only boil.elf (and
+# a Nano X variant), which are Speculos' own test binaries: a boil.elf-backed
+# emulator starts, serves the API, and answers none of the app-ethereum APDUs.
+# That failure looks like a working emulator, which is why the app path below is
+# never allowed to default to boil.elf.
+#   https://github.com/LedgerHQ/speculos/tree/master/apps
 #
 # Port map (both are Speculos defaults, kept identical inside and outside the
 # container so SPECULOS_API_URL / SPECULOS_APDU_PORT need no translation):
-#   5000  REST API   — POST /apdu, GET /events, POST /button/*, GET /screenshot
+#   5000  REST API   — POST /apdu, GET/DELETE /events, POST /button/*,
+#                      POST /automation, POST /finger, GET /screenshot
 #   9999  raw APDU   — the length-prefixed TCP socket
 #
-# Both servers bind 0.0.0.0 inside the container (speculos/main.py passes
-# host="0.0.0.0" to ApduServer, and the API runner listens on all interfaces),
-# so publishing the ports is sufficient.
+# Both servers bind 0.0.0.0 inside the container, so publishing the ports is
+# sufficient. Defaults come from speculos/main.py: --apdu-port 9999,
+# --api-port 5000.
 #
-# Reference compose file and CLI flags:
+# References:
 #   https://github.com/LedgerHQ/speculos/blob/master/docker-compose.yml
 #   https://github.com/LedgerHQ/speculos/blob/master/docs/user/docker.md
+#   https://github.com/LedgerHQ/speculos/blob/master/speculos/main.py
+#   https://github.com/LedgerHQ/speculos/blob/master/speculos/api/static/swagger/swagger.json
+#
+# Speculos itself is LGPL-3.0; the Ethereum app is Apache-2.0. Neither binary is
+# vendored here — the image is pulled and the app is fetched at run time.
 
 services:
   speculos:
     image: ghcr.io/ledgerhq/speculos:latest
     container_name: arx-speculos
     volumes:
-      # Read-only: nothing Arx does should be able to modify the app binary.
+      # Read-only: nothing Arx does should be able to modify the signing app.
       - ./data/ledger-apps:/speculos/apps:ro
     ports:
       - "5000:5000" # REST API
       - "9999:9999" # raw APDU socket
     # --model values are speculos/mcu/struct.py MODELS keys:
     #   nanox | nanosp | stax | flex | apex_p
-    # The seed is the Speculos default 24-word mnemonic, pinned explicitly so
-    # the demo derives the same account on every machine. It is a published
-    # test seed: never fund the accounts it derives.
-    command: >
-      --model ${SPECULOS_MODEL:-nanosp}
-      --display headless
-      --api-port 5000
-      --apdu-port 9999
-      --seed "${SPECULOS_SEED:-glory promote mansion idle axis finger extra february uncover one trip resource lawn turtle enact monster seven myth punch hobby comfort wild raise skin}"
-      apps/app-ethereum.elf
+    # (the original Nano S is no longer among them). The model must match the
+    # app binary's build target — nanosp pairs with the `-nanos2.elf` asset.
+    #
+    # The seed is Speculos' published default 24-word mnemonic, taken verbatim
+    # from DEFAULT_SEED in speculos/main.py and pinned explicitly so the demo
+    # derives the same account on every machine: 44'/60'/0'/0/0 gives
+    # 0xDad77910DbDFdE764fC21FCD4E74D71bBACA6D8D. It is a published test seed —
+    # never fund the accounts it derives.
+    #
+    # ARX_ETH_APP_ELF has no default: an unset value must fail loudly rather
+    # than quietly booting whatever else is in the mounted directory.
+    #
+    # Written as a list, not a string: the 24-word seed contains spaces, and a
+    # string command is re-split by Compose. A list is passed through verbatim,
+    # so the seed cannot arrive as 24 separate arguments.
+    command:
+      - "--model"
+      - "${SPECULOS_MODEL:?set SPECULOS_MODEL, or start via scripts/speculos-up.sh}"
+      - "--display"
+      - "headless"
+      - "--api-port"
+      - "5000"
+      - "--apdu-port"
+      - "9999"
+      - "--seed"
+      - "${SPECULOS_SEED:-glory promote mansion idle axis finger extra february uncover one trip resource lawn turtle enact monster seven myth punch hobby comfort wild raise skin}"
+      - "${ARX_ETH_APP_ELF:?set ARX_ETH_APP_ELF to apps/<the app-ethereum elf>, or start via scripts/speculos-up.sh}"
     healthcheck:
-      # The API answering is the only signal that the app booted.
+      # The API answering is the only signal that the app booted at all. It does
+      # NOT prove the app is app-ethereum: boil.elf serves this endpoint too.
+      # GET /events?currentscreenonly=true is in Speculos' own OpenAPI document.
       test:
         [
           "CMD-SHELL",
-          "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/events?currentscreenonly=true', timeout=2).status==200 else 1)\"",
+          "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/events?currentscreenonly=true', timeout=2).getcode()==200 else 1)\"",
         ]
       interval: 3s
       timeout: 4s
       retries: 20
-    restart: unless-stopped
+    # Deliberately not `unless-stopped`. A wrong model/app pairing makes the
+    # container exit on boot, and a restart policy would turn that into a crash
+    # loop that reads as "starting slowly" instead of "misconfigured".
+    restart: "no"

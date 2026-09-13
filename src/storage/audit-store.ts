@@ -20,6 +20,16 @@ export const AUDIT_EVENTS = [
   "APPROVAL_REVOKED",
   "SIGNING_STARTED",
   "SIGNING_SUCCEEDED",
+  /**
+   * Arx declined to pass the request to the signer at all — an invalid or
+   * pending approval, or a revoked capability. The signer was never invoked.
+   *
+   * Kept distinct from `SIGNING_FAILED`, which means the signer *was* invoked
+   * and did not produce an acceptable signature. An operator reading the log
+   * has to be able to tell "my device misbehaved" from "Arx stopped this", and
+   * one event type for both answers neither question.
+   */
+  "SIGNING_REFUSED",
   "SIGNING_FAILED",
   "SIGNATURE_VERIFIED",
   "CAPABILITY_CREATED",

@@ -14,7 +14,8 @@
     "speculos:up": "bash scripts/speculos-up.sh",
     "attack": "bun run scripts/attack.ts",
     "demo:agent": "bun run src/agent/run-demo.ts",
-    "demo:json": "bun run scripts/demo.ts --json"
+    "demo:json": "bun run scripts/demo.ts --json",
+    "demo:keyring": "bun run scripts/keyring-demo.ts"
   },
   "private": true,
   "dependencies": {
