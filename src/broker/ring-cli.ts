@@ -6,11 +6,15 @@
  * is rooted in a trustchain the agent process cannot reconstruct on its own, so
  * a compromised agent that reads Arx's disk still has nothing usable.
  *
- * Two operational notes drawn from the real CLI rather than its docs:
+ * Two operational notes drawn from the real CLI rather than its docs, both
+ * verified against `wallet-cli@2.1.0`:
  *
- *  - `ring keys` exits 0 even when the Key Ring is not initialized, reporting
- *    `{"ok": false, "error": {...}}` in its JSON body. Exit status is therefore
- *    not a usable success signal; the JSON must be parsed.
+ *  - The error channel moves with `--output`. Under `--output json` a failure
+ *    is reported as JSON on **stdout**; in human mode the same failure goes to
+ *    **stderr** with a differently-shaped error object. Both exit 1. Every call
+ *    here passes `--output json` and parses stdout, and the JSON is read
+ *    defensively rather than handed straight to `JSON.parse`, because the shape
+ *    of that envelope is not something this code should depend on.
  *  - `ring init` requires a physically attached device. Provisioning is
  *    deliberately an operator action, never something Arx attempts implicitly.
  */
@@ -18,6 +22,7 @@
 import { spawn } from "node:child_process";
 
 import { canonicalize } from "../crypto/canonical";
+import { sha256Hex } from "../crypto/hash";
 
 export type RingResult<T> =
   | { ok: true; value: T }
@@ -41,7 +46,16 @@ const DEFAULT_TIMEOUT_MS = 20_000;
 const RING_PACKAGE = process.env.ARX_WALLET_CLI_PACKAGE ??
   "@ledgerhq/wallet-cli@2.1.0";
 
-type ExecResult = { stdout: string; stderr: string; code: number | null };
+/**
+ * `stdout` is deliberately a Buffer.
+ *
+ * `ring encrypt` emits binary ciphertext. Decoding it as UTF-8 here would
+ * replace every invalid byte sequence with U+FFFD, and re-encoding that
+ * produces different bytes — so the seal would be silently unrecoverable. The
+ * corruption is invisible without a provisioned Key Ring, which is why only the
+ * callers that genuinely expect text decode it.
+ */
+type ExecResult = { stdout: Buffer; stderr: string; code: number | null };
 
 function exec(
   args: readonly string[],
@@ -75,7 +89,7 @@ function exec(
     child.on("close", (code) => {
       clearTimeout(timer);
       resolve({
-        stdout: Buffer.concat(stdout).toString("utf8"),
+        stdout: Buffer.concat(stdout),
         stderr: Buffer.concat(stderr).toString("utf8"),
         code,
       });
@@ -176,7 +190,7 @@ export class RingCli {
 
     try {
       const result = await exec(["ring", "keys", "--output", "json"]);
-      const parsed = extractJson(result.stdout);
+      const parsed = extractJson(result.stdout.toString("utf8"));
 
       if (parsed && typeof parsed === "object" && "ok" in parsed) {
         const body = parsed as {
@@ -268,15 +282,23 @@ export class RingCli {
         return {
           ok: false,
           error: readError(
-            extractJson(result.stdout),
+            extractJson(result.stdout.toString("utf8")),
             result.stderr.trim() || `ring ${operation} exited ${result.code}`,
           ),
           notInitialized: false,
         };
       }
 
-      // A failure can still arrive on stdout with exit 0.
-      const parsed = extractJson(result.stdout);
+      /*
+       * A failure can still arrive on stdout with exit 0, so the output is
+       * inspected for an error envelope. Only the leading bytes are decoded:
+       * a successful `encrypt` returns binary, and decoding all of it to look
+       * for JSON would be wasteful on a large payload. An error envelope is
+       * small and always appears at the start.
+       */
+      const parsed = extractJson(
+        result.stdout.subarray(0, 4096).toString("utf8"),
+      );
 
       if (parsed && typeof parsed === "object" && "ok" in parsed) {
         const body = parsed as { ok: boolean };
@@ -290,7 +312,8 @@ export class RingCli {
         }
       }
 
-      return { ok: true, value: Buffer.from(result.stdout, "utf8") };
+      // The raw bytes, never a round-trip through a string.
+      return { ok: true, value: result.stdout };
     } catch (error) {
       return {
         ok: false,
@@ -313,7 +336,7 @@ export class RingCli {
         timeoutMs: 60_000,
       });
 
-      const parsed = extractJson(result.stdout);
+      const parsed = extractJson(result.stdout.toString("utf8"));
 
       if (parsed && typeof parsed === "object" && "ok" in parsed) {
         const body = parsed as { ok: boolean; data?: unknown };
@@ -337,9 +360,14 @@ export class RingCli {
     }
   }
 
-  /** Stable fingerprint of a sealing request, for the audit record. */
+  /**
+   * Stable fingerprint of a sealing request, for the audit record.
+   *
+   * Previously returned the canonical JSON itself, which is the opposite of a
+   * fingerprint: it would have written the payload into the audit log verbatim.
+   */
   static sealFingerprint(keyName: string, payload: unknown): string {
-    return canonicalize({ keyName, payload });
+    return `0x${sha256Hex(canonicalize({ keyName, payload }))}`;
   }
 }
 

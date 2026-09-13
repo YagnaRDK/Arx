@@ -1,6 +1,8 @@
 import { db } from "../db/database";
+import { ArxError } from "../core/errors";
 import {
   ApprovalSchema,
+  canTransition,
   type Approval,
   type ApprovalStatus,
   type ApprovalType,
@@ -156,12 +158,28 @@ export class ApprovalStore {
     ).map(rowToApproval);
   }
 
-  /** Returns false when the approval was not in `from`, i.e. someone else won. */
+  /**
+   * Returns false when the approval was not in `from`, i.e. someone else won.
+   *
+   * Legality is checked here as well as in `ApprovalService`. The service is
+   * where the state machine is enforced and where the specific decision codes
+   * come from; this is a backstop, so that a future call site added directly
+   * against the store cannot write a transition the machine forbids. Belt and
+   * braces on the one table whose integrity the signing guarantee rests on.
+   */
   transition(
     approvalId: string,
     from: ApprovalStatus,
     to: ApprovalStatus,
   ): boolean {
+    if (!canTransition(from, to)) {
+      throw new ArxError(
+        "APPROVAL_STATE_CONFLICT",
+        `Illegal approval transition ${from} -> ${to}`,
+        { details: { approvalId, from, to } },
+      );
+    }
+
     return this.transitionStatement.run(to, approvalId, from).changes > 0;
   }
 

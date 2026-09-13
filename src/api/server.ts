@@ -170,6 +170,31 @@ export async function buildServer() {
       return sendArxError(reply, error);
     }
 
+    /*
+     * Fastify's own client errors are the caller's mistake, not Arx's.
+     *
+     * Malformed JSON, an empty body where one is required, or a body over the
+     * limit arrive as plain Fastify errors carrying a 4xx `statusCode`. Routing
+     * them through the 500 branch reported a caller error as an Arx internal
+     * failure *and* logged it at error level — a cheap way for anyone to fill an
+     * operator's logs with noise that looks like Arx breaking.
+     *
+     * Nothing is authorized on this path either way, so this is observability
+     * rather than a bypass.
+     */
+    const status = (error as { statusCode?: unknown }).statusCode;
+
+    if (typeof status === "number" && status >= 400 && status < 500) {
+      request.log.info({ err: error }, "malformed request");
+
+      return reply.code(status).send({
+        allowed: false,
+        code: "INVALID_INTENT",
+        reason:
+          error instanceof Error ? error.message : "Malformed request",
+      });
+    }
+
     request.log.error(error);
 
     return reply.code(500).send({
@@ -263,7 +288,24 @@ export async function buildServer() {
     };
   });
 
-  app.get("/events/stream", async (request, reply) => {
+  /*
+   * The live feed carries every decision, recipient, amount and risk signal —
+   * the same disclosure as `GET /audit`, but streaming. It is guarded and
+   * scoped identically.
+   *
+   * `EventSource` cannot send headers, so under the locked-down posture a
+   * browser cannot authenticate this stream. The cockpit already handles that:
+   * it abandons the stream after a few failures, reports "polling" in its
+   * header, and keeps the feed current by polling `/audit` with its token. That
+   * is the better trade — accepting a credential in the query string would put
+   * it in every access log.
+   */
+  app.get(
+    "/events/stream",
+    { preHandler: auth.requireReader() },
+    async (request, reply) => {
+    const scope = readerScope(request);
+
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -271,7 +313,21 @@ export async function buildServer() {
       "X-Accel-Buffering": "no",
     });
 
-    const send = (event: { seq: number; type: string; at: number; data: unknown }) => {
+    const send = (event: {
+      seq: number;
+      type: string;
+      at: number;
+      data: Record<string, unknown>;
+    }) => {
+      // An event with no agent is infrastructure and carries nobody's data.
+      if (scope !== undefined) {
+        const eventAgent = event.data.agentId;
+
+        if (typeof eventAgent === "string" && eventAgent !== scope) {
+          return;
+        }
+      }
+
       reply.raw.write(`id: ${event.seq}\n`);
       reply.raw.write(`event: ${event.type}\n`);
       reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
@@ -289,7 +345,8 @@ export async function buildServer() {
       clearInterval(heartbeat);
       unsubscribe();
     });
-  });
+    },
+  );
 
   // ── Capabilities (control plane) ──────────────────────────────────────────
   app.post(
@@ -345,19 +402,28 @@ export async function buildServer() {
     const query = request.query as { agentId?: string; limit?: string };
     const limit = Math.min(Number(query.limit ?? 100) || 100, 500);
 
+    const scope = readerScope(request);
+    // An agent's own grants only; the requested filter cannot widen the scope.
+    const agentId = scope ?? query.agentId;
+
     return {
-      capabilities: query.agentId
-        ? capabilityStore.listByAgent(query.agentId, limit)
+      capabilities: agentId
+        ? capabilityStore.listByAgent(agentId, limit)
         : capabilityStore.list(limit),
     };
   });
 
   app.get<{ Params: { capabilityId: string } }>(
     "/capabilities/:capabilityId",
+    { preHandler: auth.requireReader() },
     async (request, reply) => {
       const capability = capabilityStore.get(request.params.capabilityId);
+      const scope = readerScope(request);
 
-      if (!capability) {
+      // Another agent's grant is not-found rather than forbidden: the
+      // allowlists and ceilings it holds are exactly the reconnaissance this
+      // scoping exists to withhold.
+      if (!capability || (scope !== undefined && capability.agentId !== scope)) {
         return reply.code(404).send({
           allowed: false,
           code: "CAPABILITY_NOT_FOUND",
@@ -403,6 +469,26 @@ export async function buildServer() {
   );
 
   // ── Evaluation ────────────────────────────────────────────────────────────
+
+  /**
+   * The agent a read should be limited to, or undefined for an unrestricted read.
+   *
+   * `requireReader` accepts either credential, but they are not equivalent: an
+   * operator's admin token is meant to see the whole deployment, while an agent
+   * should see its own decisions and nobody else's. Without this distinction an
+   * enrolled agent could enumerate every other agent's approvals, counterparties
+   * and amounts — confidentiality rather than escalation, but cross-tenant, and
+   * a deployment that runs several agents is the case Arx is built for.
+   *
+   * Undefined under the open demo posture, where no identity is established.
+   */
+  function readerScope(request: FastifyRequest): string | undefined {
+    if (request.arxAdmin !== undefined) {
+      return undefined;
+    }
+
+    return request.arxAgent?.agentId;
+  }
 
   /** Parses and validates an intent body, throwing a specific ArxError. */
   function parseIntent(body: unknown) {
@@ -688,21 +774,40 @@ export async function buildServer() {
   );
 
   /** The escalation queue, which is what the human approval UI reads. */
-  app.get("/approvals/pending", { preHandler: auth.requireReader() }, async () => ({
-    approvals: humanApprovalQueue.listPending(),
-  }));
+  app.get(
+    "/approvals/pending",
+    { preHandler: auth.requireReader() },
+    async (request) => {
+      const scope = readerScope(request);
+      const pending = humanApprovalQueue.listPending();
+
+      return {
+        approvals:
+          scope === undefined
+            ? pending
+            : pending.filter((approval) => approval.agentId === scope),
+      };
+    },
+  );
 
   app.get("/approvals", { preHandler: auth.requireReader() }, async (request) => {
     const query = request.query as { status?: string; limit?: string };
     const limit = Math.min(Number(query.limit ?? 100) || 100, 500);
 
+    const scope = readerScope(request);
+
+    const approvals = query.status
+      ? approvalStore.listByStatus(
+          query.status as Parameters<typeof approvalStore.listByStatus>[0],
+          limit,
+        )
+      : approvalStore.list(limit);
+
     return {
-      approvals: query.status
-        ? approvalStore.listByStatus(
-            query.status as Parameters<typeof approvalStore.listByStatus>[0],
-            limit,
-          )
-        : approvalStore.list(limit),
+      approvals:
+        scope === undefined
+          ? approvals
+          : approvals.filter((approval) => approval.agentId === scope),
       authorizationKey: approvalService.authorizationKeyInfo(),
     };
   });
@@ -712,8 +817,11 @@ export async function buildServer() {
     { preHandler: auth.requireReader() },
     async (request, reply) => {
       const approval = approvalStore.get(request.params.approvalId);
+      const scope = readerScope(request);
 
-      if (!approval) {
+      // Reported as not-found rather than forbidden: confirming that someone
+      // else's approval exists is itself the disclosure being prevented.
+      if (!approval || (scope !== undefined && approval.agentId !== scope)) {
         return reply.code(404).send({
           allowed: false,
           code: "APPROVAL_NOT_FOUND",
@@ -806,6 +914,51 @@ export async function buildServer() {
           allowed: false,
           code: "APPROVAL_NOT_FOUND",
           reason: "Approval does not exist",
+        });
+      }
+
+      /*
+       * The caller must be the agent the approval was issued to.
+       *
+       * `/sign` carries an approvalId rather than an agentId, so
+       * `bindBodyAgentId` has nothing to bind and the middleware's usual
+       * cross-agent check does not apply here. Without this, any enrolled agent
+       * could present another agent's approvalId: verified before the fix —
+       * agent "bob", authenticated only as himself, obtained 200 SIGNED against
+       * an approval issued to "alice".
+       *
+       * The transaction was already authorized for alice and the device key is
+       * shared, so bob gains no new authority — but he decides *when* her
+       * approved transaction is signed, consumes her one-shot approval, and
+       * receives the signed bytes before she chooses to broadcast. In a
+       * multi-agent deployment, which is the threat model Arx exists for,
+       * per-agent least privilege would otherwise stop at the one step that
+       * produces a signature.
+       *
+       * Under the default open posture no agent identity is established, so
+       * this changes nothing for the single-agent demo.
+       */
+      if (
+        request.arxAgent !== undefined &&
+        request.arxAgent.agentId !== approval.agentId
+      ) {
+        auditStore.append({
+          eventType: "SIGNING_REFUSED",
+          requestId,
+          approvalId: approval.approvalId,
+          agentId: request.arxAgent.agentId,
+          capabilityId: approval.capabilityId,
+          decision: "DENY",
+          code: "AGENT_MISMATCH",
+          reason: `Agent ${request.arxAgent.agentId} attempted to sign an approval issued to ${approval.agentId}`,
+        });
+
+        return reply.code(403).send({
+          requestId,
+          allowed: false,
+          code: "AGENT_MISMATCH",
+          reason:
+            "This approval was issued to a different agent. An approval authorizes one transaction for one agent.",
         });
       }
 
@@ -1018,7 +1171,20 @@ export async function buildServer() {
     const query = request.query as { limit?: string };
     const limit = Math.min(Number(query.limit ?? 100) || 100, 1000);
 
-    return { head: auditStore.head(), entries: auditStore.list(limit) };
+    const scope = readerScope(request);
+    const entries = auditStore.list(limit);
+
+    return {
+      head: auditStore.head(),
+      entries:
+        scope === undefined
+          ? entries
+          : // An entry with no agent is infrastructure (a capability grant, a
+            // sweep); those carry no other agent's data and stay visible.
+            entries.filter(
+              (entry) => entry.agentId === null || entry.agentId === scope,
+            ),
+    };
   });
 
   app.get("/audit/verify", { preHandler: auth.requireReader() }, async () => {
@@ -1035,10 +1201,20 @@ export async function buildServer() {
   app.get<{ Params: { requestId: string } }>(
     "/audit/:requestId",
     { preHandler: auth.requireReader() },
-    async (request) => ({
-      requestId: request.params.requestId,
-      trail: auditStore.byRequest(request.params.requestId),
-    }),
+    async (request) => {
+      const scope = readerScope(request);
+      const trail = auditStore.byRequest(request.params.requestId);
+
+      return {
+        requestId: request.params.requestId,
+        trail:
+          scope === undefined
+            ? trail
+            : trail.filter(
+                (entry) => entry.agentId === null || entry.agentId === scope,
+              ),
+      };
+    },
   );
 
   // ── Broker (control plane) ────────────────────────────────────────────────
