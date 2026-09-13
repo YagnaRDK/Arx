@@ -38,3 +38,4 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 data/*.sqlite
 data/*.sqlite-shm
 data/*.sqlite-wal
+.test-data/
