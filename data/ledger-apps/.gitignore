@@ -1,0 +1,5 @@
+# The Ledger Ethereum app binary is fetched by scripts/speculos-up.sh from the
+# LedgerHQ/app-ethereum GitHub release. It is a ~280KB ARM ELF and does not
+# belong in git — the directory is tracked, its contents are not.
+*.elf
+*.elf.tmp

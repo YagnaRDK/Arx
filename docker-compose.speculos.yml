@@ -1,0 +1,51 @@
+# Speculos — the Ledger device emulator — for the Arx signing boundary.
+#
+# Start it with `scripts/speculos-up.sh`, which also fetches the Ethereum app
+# binary this file expects at ./data/ledger-apps/app-ethereum.elf.
+#
+# Port map (both are Speculos defaults, kept identical inside and outside the
+# container so SPECULOS_API_URL / SPECULOS_APDU_PORT need no translation):
+#   5000  REST API   — POST /apdu, GET /events, POST /button/*, GET /screenshot
+#   9999  raw APDU   — the length-prefixed TCP socket
+#
+# Both servers bind 0.0.0.0 inside the container (speculos/main.py passes
+# host="0.0.0.0" to ApduServer, and the API runner listens on all interfaces),
+# so publishing the ports is sufficient.
+#
+# Reference compose file and CLI flags:
+#   https://github.com/LedgerHQ/speculos/blob/master/docker-compose.yml
+#   https://github.com/LedgerHQ/speculos/blob/master/docs/user/docker.md
+
+services:
+  speculos:
+    image: ghcr.io/ledgerhq/speculos:latest
+    container_name: arx-speculos
+    volumes:
+      # Read-only: nothing Arx does should be able to modify the app binary.
+      - ./data/ledger-apps:/speculos/apps:ro
+    ports:
+      - "5000:5000" # REST API
+      - "9999:9999" # raw APDU socket
+    # --model values are speculos/mcu/struct.py MODELS keys:
+    #   nanox | nanosp | stax | flex | apex_p
+    # The seed is the Speculos default 24-word mnemonic, pinned explicitly so
+    # the demo derives the same account on every machine. It is a published
+    # test seed: never fund the accounts it derives.
+    command: >
+      --model ${SPECULOS_MODEL:-nanosp}
+      --display headless
+      --api-port 5000
+      --apdu-port 9999
+      --seed "${SPECULOS_SEED:-glory promote mansion idle axis finger extra february uncover one trip resource lawn turtle enact monster seven myth punch hobby comfort wild raise skin}"
+      apps/app-ethereum.elf
+    healthcheck:
+      # The API answering is the only signal that the app booted.
+      test:
+        [
+          "CMD-SHELL",
+          "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/events?currentscreenonly=true', timeout=2).status==200 else 1)\"",
+        ]
+      interval: 3s
+      timeout: 4s
+      retries: 20
+    restart: unless-stopped

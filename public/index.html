@@ -1,0 +1,2376 @@
+<!--
+  The Arx Security Cockpit.
+
+  Served as a static file by Fastify from `public/`. Plain HTML, CSS and vanilla
+  JS in one file: no build step, no framework, no CDN. A judging room's wifi is
+  not a dependency this page is allowed to have.
+
+  Two design rules run through it:
+
+  1. Nothing is asserted that the API did not say. Every panel distinguishes
+     "the server reported this" from "this was derived here" from "the server
+     does not expose this yet", and says which. A cockpit that renders a
+     confident number it invented is worse than one that renders nothing.
+
+  2. A mock is never dressed as real. When the signer mode is mock the device
+     panel says so at full size, in the same place a real device address would
+     otherwise appear.
+-->
+<title>Arx Security Cockpit</title>
+<meta name="color-scheme" content="dark" />
+
+<style>
+  :root {
+    --bg: #080b10;
+    --panel: #10161f;
+    --panel-2: #151d29;
+    --line: #223041;
+    --line-strong: #31455c;
+    --text: #eaf1f8;
+    --text-2: #a6bacd;
+    --allow: #35d68a;
+    --deny: #ff5c68;
+    --escalate: #ffb340;
+    --info: #56a9ff;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font:
+      15px/1.45 -apple-system,
+      BlinkMacSystemFont,
+      "Segoe UI",
+      Roboto,
+      Helvetica,
+      Arial,
+      sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* --- chrome --------------------------------------------------------- */
+
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    padding: 12px 18px;
+    background: #060911;
+    border-bottom: 1px solid var(--line-strong);
+  }
+
+  .brand {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    font-size: 17px;
+  }
+
+  .brand small {
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    font-size: 12px;
+    color: var(--text-2);
+  }
+
+  .spacer {
+    flex: 1 1 auto;
+  }
+
+  .conn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 700;
+  }
+
+  .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--deny);
+    box-shadow: 0 0 0 3px rgba(255, 92, 104, 0.18);
+  }
+
+  .dot.up {
+    background: var(--allow);
+    box-shadow: 0 0 0 3px rgba(53, 214, 138, 0.18);
+  }
+
+  .dot.warn {
+    background: var(--escalate);
+    box-shadow: 0 0 0 3px rgba(255, 179, 64, 0.18);
+  }
+
+  input[type="text"],
+  input[type="password"] {
+    background: #0b1118;
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+    color: var(--text);
+    font: 13px/1.2 var(--mono);
+    padding: 7px 9px;
+    min-width: 0;
+  }
+
+  input::placeholder {
+    color: #6d8299;
+  }
+
+  button {
+    background: #1b2734;
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+    color: var(--text);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 700;
+    padding: 7px 12px;
+  }
+
+  button:hover {
+    background: #24374a;
+  }
+
+  button.primary {
+    background: #11522f;
+    border-color: #1c7a47;
+    color: #d6ffe8;
+  }
+
+  button.primary:hover {
+    background: #17693c;
+  }
+
+  button.danger {
+    background: #571a20;
+    border-color: #8c2c35;
+    color: #ffe0e3;
+  }
+
+  button.danger:hover {
+    background: #6d222a;
+  }
+
+  .banner {
+    padding: 10px 18px;
+    font-size: 14px;
+    font-weight: 700;
+    background: #3a1015;
+    border-bottom: 1px solid #7c2630;
+    color: #ffd9dd;
+  }
+
+  .banner[hidden] {
+    display: none !important;
+  }
+
+  /* --- layout --------------------------------------------------------- */
+
+  main {
+    display: grid;
+    grid-template-columns: repeat(12, 1fr);
+    gap: 14px;
+    padding: 14px 18px 40px;
+  }
+
+  section {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .c3 {
+    grid-column: span 3;
+  }
+  .c4 {
+    grid-column: span 4;
+  }
+  .c5 {
+    grid-column: span 5;
+  }
+  .c6 {
+    grid-column: span 6;
+  }
+  .c7 {
+    grid-column: span 7;
+  }
+  .c8 {
+    grid-column: span 8;
+  }
+  .c12 {
+    grid-column: span 12;
+  }
+
+  @media (max-width: 1180px) {
+    .c3,
+    .c4,
+    .c5,
+    .c7,
+    .c8 {
+      grid-column: span 6;
+    }
+  }
+
+  @media (max-width: 760px) {
+    main {
+      padding: 12px;
+      gap: 12px;
+    }
+
+    .c3,
+    .c4,
+    .c5,
+    .c6,
+    .c7,
+    .c8 {
+      grid-column: span 12;
+    }
+  }
+
+  h2 {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0;
+    padding: 11px 14px;
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: #c7d7e6;
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--line);
+  }
+
+  h2 .src {
+    margin-left: auto;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    color: #87a0b8;
+    text-transform: none;
+  }
+
+  .body {
+    padding: 14px;
+  }
+
+  .scroll {
+    max-height: 340px;
+    overflow-y: auto;
+  }
+
+  /* --- primitives ----------------------------------------------------- */
+
+  .rows {
+    display: grid;
+    gap: 7px;
+  }
+
+  .row {
+    display: grid;
+    grid-template-columns: 130px 1fr;
+    gap: 10px;
+    align-items: baseline;
+  }
+
+  .row > .k {
+    color: var(--text-2);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .row > .v {
+    font-size: 14px;
+    overflow-wrap: anywhere;
+  }
+
+  @media (max-width: 520px) {
+    .row {
+      grid-template-columns: 1fr;
+      gap: 2px;
+    }
+  }
+
+  .mono {
+    font-family: var(--mono);
+    font-size: 13px;
+  }
+
+  .muted {
+    color: var(--text-2);
+  }
+
+  .tag {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.07em;
+    border: 1px solid currentColor;
+  }
+
+  .t-allow {
+    color: var(--allow);
+    background: rgba(53, 214, 138, 0.12);
+  }
+  .t-deny {
+    color: var(--deny);
+    background: rgba(255, 92, 104, 0.12);
+  }
+  .t-escalate {
+    color: var(--escalate);
+    background: rgba(255, 179, 64, 0.12);
+  }
+  .t-info {
+    color: var(--info);
+    background: rgba(86, 169, 255, 0.12);
+  }
+  .t-idle {
+    color: #8ea4ba;
+    background: rgba(142, 164, 186, 0.1);
+  }
+
+  .missing {
+    color: var(--escalate);
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .meter {
+    height: 12px;
+    border-radius: 7px;
+    background: #0a1219;
+    border: 1px solid var(--line-strong);
+    overflow: hidden;
+  }
+
+  .meter > i {
+    display: block;
+    height: 100%;
+    background: var(--allow);
+    transition: width 0.25s ease;
+  }
+
+  .meter.hot > i {
+    background: var(--escalate);
+  }
+  .meter.crit > i {
+    background: var(--deny);
+  }
+
+  /* --- decision feed -------------------------------------------------- */
+
+  .feed {
+    display: grid;
+  }
+
+  .feed-item {
+    display: grid;
+    grid-template-columns: 84px 1fr;
+    gap: 10px;
+    padding: 9px 14px;
+    border-bottom: 1px solid #1a2432;
+    cursor: pointer;
+    background: none;
+    border-left: 3px solid transparent;
+    text-align: left;
+    width: 100%;
+    color: inherit;
+    font: inherit;
+    border-right: 0;
+    border-top: 0;
+    border-radius: 0;
+  }
+
+  .feed-item:hover {
+    background: #141d28;
+  }
+
+  .feed-item.sel {
+    background: #17222f;
+    border-left-color: var(--info);
+  }
+
+  .feed-item .code {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 700;
+  }
+
+  .feed-item .why {
+    color: var(--text-2);
+    font-size: 13px;
+    overflow-wrap: anywhere;
+  }
+
+  .feed-item .when {
+    color: #8ea4ba;
+    font-size: 11px;
+    font-family: var(--mono);
+  }
+
+  /* --- pipeline ------------------------------------------------------- */
+
+  .stage {
+    display: grid;
+    grid-template-columns: 26px 132px 1fr;
+    gap: 10px;
+    align-items: start;
+    padding: 9px 0;
+    border-bottom: 1px dashed #1c2734;
+  }
+
+  .stage:last-child {
+    border-bottom: 0;
+  }
+
+  .pip {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    font-size: 12px;
+    font-weight: 900;
+    border: 2px solid;
+  }
+
+  .pip.pass {
+    color: var(--allow);
+    border-color: var(--allow);
+    background: rgba(53, 214, 138, 0.12);
+  }
+  .pip.fail {
+    color: var(--deny);
+    border-color: var(--deny);
+    background: rgba(255, 92, 104, 0.12);
+  }
+  .pip.esc {
+    color: var(--escalate);
+    border-color: var(--escalate);
+    background: rgba(255, 179, 64, 0.12);
+  }
+  .pip.skip {
+    color: #7f95ab;
+    border-color: #3c5065;
+  }
+
+  .stage .name {
+    font-weight: 800;
+    font-size: 13px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .stage .name span {
+    display: block;
+    font-weight: 600;
+    letter-spacing: 0;
+    text-transform: none;
+    color: #8ea4ba;
+    font-size: 11px;
+  }
+
+  .stage .detail {
+    font-size: 13.5px;
+    overflow-wrap: anywhere;
+  }
+
+  .stage .detail .c {
+    font-family: var(--mono);
+    font-weight: 700;
+  }
+
+  /* --- tables --------------------------------------------------------- */
+
+  .queue-item {
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+    background: #0e1520;
+  }
+
+  .queue-item:last-child {
+    margin-bottom: 0;
+  }
+
+  .queue-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+
+  .integrations {
+    display: grid;
+    gap: 8px;
+  }
+
+  .integration {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 10px;
+    align-items: center;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: #0e1520;
+  }
+
+  .integration .n {
+    font-weight: 700;
+    font-size: 13.5px;
+  }
+
+  .integration .d {
+    color: var(--text-2);
+    font-size: 12px;
+  }
+
+  .mockstrip {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: #43290a;
+    border: 1px solid var(--escalate);
+    color: #ffe4bd;
+    font-weight: 800;
+    font-size: 14px;
+    letter-spacing: 0.02em;
+  }
+
+  .screens {
+    display: grid;
+    gap: 8px;
+  }
+
+  .screen {
+    border: 1px solid #2f4459;
+    border-radius: 8px;
+    background: #05080d;
+    padding: 9px 11px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .screen b {
+    display: block;
+    color: var(--info);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    margin-bottom: 4px;
+  }
+
+  .hint {
+    margin-top: 12px;
+    padding: 10px 11px;
+    border-left: 3px solid var(--line-strong);
+    background: #0c131c;
+    color: var(--text-2);
+    font-size: 12.5px;
+  }
+
+  .hint code {
+    display: block;
+    margin-top: 6px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: #cfe0f0;
+    overflow-x: auto;
+    white-space: pre;
+  }
+
+  .signal {
+    padding: 9px 0;
+    border-bottom: 1px dashed #1c2734;
+  }
+
+  .signal:last-child {
+    border-bottom: 0;
+  }
+
+  .signal .h {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    flex-wrap: wrap;
+  }
+
+  .signal .w {
+    font-family: var(--mono);
+    font-weight: 800;
+    color: var(--escalate);
+  }
+
+  .signal .i {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 13px;
+  }
+
+  .signal .e {
+    color: var(--text-2);
+    font-size: 13px;
+    margin-top: 3px;
+  }
+
+  .empty {
+    color: var(--text-2);
+    font-size: 13.5px;
+    padding: 6px 0;
+  }
+</style>
+
+<header>
+  <div class="brand">ARX <small>SECURITY COCKPIT</small></div>
+
+  <div class="conn">
+    <span class="dot" id="dot"></span>
+    <span id="conn-text">connecting</span>
+  </div>
+
+  <span class="tag t-idle" id="stream-state">STREAM: probing</span>
+  <span class="tag t-idle" id="signer-badge">SIGNER: unknown</span>
+
+  <div class="spacer"></div>
+
+  <input
+    type="text"
+    id="api-base"
+    placeholder="API base (blank = this origin)"
+    style="width: 190px"
+    aria-label="API base URL"
+  />
+  <input
+    type="password"
+    id="admin-token"
+    placeholder="admin token"
+    style="width: 150px"
+    aria-label="Admin token"
+  />
+  <button id="refresh">Refresh</button>
+</header>
+
+<div class="banner" id="banner" hidden></div>
+
+<main>
+  <!-- Agent and capability ------------------------------------------- -->
+  <section class="c5">
+    <h2>
+      Agent &amp; capability
+      <span class="src" id="cap-src">GET /capabilities</span>
+    </h2>
+    <div class="body">
+      <div class="rows" id="cap-rows"></div>
+      <div style="margin-top: 14px" id="spend-block"></div>
+      <div style="margin-top: 12px" id="cap-picker"></div>
+    </div>
+  </section>
+
+  <!-- Risk ------------------------------------------------------------- -->
+  <section class="c4">
+    <h2>Risk <span class="src" id="risk-src">selected request</span></h2>
+    <div class="body" id="risk-body"></div>
+  </section>
+
+  <!-- Device ----------------------------------------------------------- -->
+  <section class="c3">
+    <h2>Signing device <span class="src">GET /signer</span></h2>
+    <div class="body" id="device-body"></div>
+  </section>
+
+  <!-- Decision feed ---------------------------------------------------- -->
+  <section class="c5">
+    <h2>
+      Live decision feed
+      <span class="src" id="feed-src">GET /audit</span>
+    </h2>
+    <div class="feed scroll" id="feed"></div>
+  </section>
+
+  <!-- Pipeline --------------------------------------------------------- -->
+  <section class="c7">
+    <h2>
+      Pipeline trace
+      <span class="src" id="trace-src">GET /audit/:requestId</span>
+    </h2>
+    <div class="body">
+      <div class="rows" id="trace-head" style="margin-bottom: 10px"></div>
+      <div id="trace-stages"></div>
+    </div>
+  </section>
+
+  <!-- Approval queue --------------------------------------------------- -->
+  <section class="c7">
+    <h2>
+      Human approval queue
+      <span class="src">GET /approvals &middot; POST /approvals/:id/approve</span>
+    </h2>
+    <div class="body scroll" id="queue-body"></div>
+  </section>
+
+  <!-- Audit chain ------------------------------------------------------ -->
+  <section class="c5">
+    <h2>Audit chain <span class="src">GET /audit/verify</span></h2>
+    <div class="body" id="chain-body"></div>
+  </section>
+
+  <!-- Integrations ----------------------------------------------------- -->
+  <section class="c12">
+    <h2>Integrations <span class="src">GET /integrations</span></h2>
+    <div class="body" id="integrations-body"></div>
+  </section>
+</main>
+
+<script>
+  "use strict";
+
+  // --- configuration -------------------------------------------------
+  // The page is normally served by the same Fastify instance it talks to, so a
+  // blank base means "this origin". An explicit base is kept so the cockpit can
+  // also be opened from a file or a different port during development.
+
+  const store = {
+    get(key, fallback) {
+      try {
+        const value = localStorage.getItem(key);
+        return value === null ? fallback : value;
+      } catch {
+        return fallback;
+      }
+    },
+    set(key, value) {
+      try {
+        localStorage.setItem(key, value);
+      } catch {
+        /* private window or blocked storage: the page must still work */
+      }
+    },
+  };
+
+  const query = new URLSearchParams(location.search);
+
+  const config = {
+    base: (query.get("api") || store.get("arx.base", "") || "").replace(
+      /\/+$/,
+      "",
+    ),
+    token: store.get("arx.token", ""),
+  };
+
+  const $ = (id) => document.getElementById(id);
+
+  $("api-base").value = config.base;
+  $("admin-token").value = config.token;
+
+  $("api-base").addEventListener("change", (event) => {
+    config.base = event.target.value.trim().replace(/\/+$/, "");
+    store.set("arx.base", config.base);
+    resetStream();
+    void refreshAll();
+  });
+
+  $("admin-token").addEventListener("change", (event) => {
+    config.token = event.target.value.trim();
+    store.set("arx.token", config.token);
+    render();
+  });
+
+  $("refresh").addEventListener("click", () => void refreshAll());
+
+  // --- state ---------------------------------------------------------
+
+  const state = {
+    reachable: null,
+    lastError: "",
+    health: null,
+    signer: null,
+    integrations: null,
+    capabilities: [],
+    selectedCapabilityId: null,
+    approvals: [],
+    audit: [],
+    chain: null,
+    verification: null,
+    verifying: false,
+    feed: [],
+    selectedRequestId: null,
+    trace: null,
+    traceRequestId: null,
+    liveRisk: new Map(),
+    livePipeline: new Map(),
+    recipientByApproval: new Map(),
+    recipientByRequest: new Map(),
+    capabilityDetail: null,
+    streamState: "probing",
+    missing: new Set(),
+  };
+
+  // --- HTTP ----------------------------------------------------------
+
+  async function api(path, options) {
+    const url = `${config.base}${path}`;
+    const init = { headers: { accept: "application/json" } };
+
+    if (options && options.method) {
+      init.method = options.method;
+    }
+
+    if (options && options.body !== undefined) {
+      init.method = init.method || "POST";
+      init.headers["content-type"] = "application/json";
+      init.body = JSON.stringify(options.body);
+    }
+
+    if (options && options.admin && config.token) {
+      init.headers.authorization = `Bearer ${config.token}`;
+      init.headers["x-arx-admin-token"] = config.token;
+    }
+
+    try {
+      const response = await fetch(url, init);
+      const text = await response.text();
+      let body = null;
+
+      try {
+        body = text ? JSON.parse(text) : null;
+      } catch {
+        body = text;
+      }
+
+      const routeMissing =
+        response.status === 404 &&
+        body &&
+        typeof body === "object" &&
+        (body.code === "FST_ERR_NOT_FOUND" ||
+          /^Route\s+\S+\s+not found/i.test(String(body.message || "")));
+
+      if (routeMissing) {
+        state.missing.add(path.split("?")[0]);
+      }
+
+      state.reachable = true;
+
+      return { ok: response.ok, status: response.status, body, routeMissing };
+    } catch (error) {
+      state.reachable = false;
+      state.lastError = String((error && error.message) || error);
+
+      return {
+        ok: false,
+        status: 0,
+        body: null,
+        routeMissing: false,
+        transport: true,
+      };
+    }
+  }
+
+  // --- helpers -------------------------------------------------------
+
+  const html = (value) =>
+    String(value === null || value === undefined ? "" : value).replace(
+      /[&<>"']/g,
+      (char) =>
+        ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
+        })[char],
+    );
+
+  const usd = (value) =>
+    typeof value === "number" && isFinite(value)
+      ? `$${value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+      : null;
+
+  function shortHash(value, keep) {
+    if (typeof value !== "string" || value.length <= 2 * (keep || 8) + 3) {
+      return value || "";
+    }
+
+    const size = keep || 8;
+
+    return `${value.slice(0, size + 2)}…${value.slice(-size)}`;
+  }
+
+  function clock(seconds) {
+    if (!seconds) {
+      return "";
+    }
+
+    const ms = seconds > 1e11 ? seconds : seconds * 1000;
+
+    return new Date(ms).toLocaleTimeString("en-GB", { hour12: false });
+  }
+
+  function verdictOf(entry) {
+    const explicit = entry.decision || entry.verdict;
+
+    if (explicit === "ALLOW" || explicit === "DENY" || explicit === "ESCALATE") {
+      return explicit;
+    }
+
+    const code = entry.code || entry.policyCode;
+
+    if (code === "HUMAN_APPROVAL_REQUIRED" || code === "APPROVAL_PENDING_HUMAN") {
+      return "ESCALATE";
+    }
+
+    if (code === "POLICY_APPROVED") {
+      return "ALLOW";
+    }
+
+    return code ? "DENY" : "UNKNOWN";
+  }
+
+  function verdictTag(verdict) {
+    const cls =
+      verdict === "ALLOW"
+        ? "t-allow"
+        : verdict === "ESCALATE"
+          ? "t-escalate"
+          : verdict === "DENY"
+            ? "t-deny"
+            : "t-idle";
+
+    return `<span class="tag ${cls}">${html(verdict)}</span>`;
+  }
+
+  function missingNote(path, what) {
+    return `<div class="missing">${html(what)} — <span class="mono">${html(path)}</span> is not available on this server.</div>`;
+  }
+
+  // --- fetchers ------------------------------------------------------
+
+  async function refreshAll() {
+    const [health, signer, integrations, capabilities, approvals, audit] =
+      await Promise.all([
+        api("/health"),
+        api("/signer"),
+        api("/integrations"),
+        api("/capabilities"),
+        api("/approvals?limit=50"),
+        api("/audit?limit=60"),
+      ]);
+
+    if (health.ok) {
+      state.health = health.body;
+    }
+
+    if (signer.ok) {
+      state.signer = signer.body;
+    }
+
+    if (integrations.ok) {
+      state.integrations = integrations.body;
+    } else if (integrations.routeMissing) {
+      state.integrations = "MISSING";
+    }
+
+    if (capabilities.ok) {
+      state.capabilities = normaliseCapabilities(capabilities.body);
+
+      if (
+        !state.selectedCapabilityId ||
+        !state.capabilities.some(
+          (capability) => capability.capabilityId === state.selectedCapabilityId,
+        )
+      ) {
+        state.selectedCapabilityId = state.capabilities.length
+          ? state.capabilities[0].capabilityId
+          : null;
+      }
+    } else if (capabilities.routeMissing) {
+      state.capabilities = "MISSING";
+    }
+
+    if (approvals.ok) {
+      state.approvals = normaliseApprovals(approvals.body);
+    } else if (approvals.routeMissing) {
+      state.approvals = "MISSING";
+    }
+
+    if (audit.ok) {
+      state.audit = normaliseAudit(audit.body);
+      state.chain = readChainMeta(audit.body, state.audit);
+      rebuildFeedFromAudit();
+    } else if (audit.routeMissing) {
+      state.audit = "MISSING";
+    }
+
+    if (state.selectedCapabilityId) {
+      const detail = await api(
+        `/capabilities/${encodeURIComponent(state.selectedCapabilityId)}`,
+      );
+
+      state.capabilityDetail =
+        detail.ok && detail.body && typeof detail.body === "object"
+          ? detail.body
+          : null;
+    }
+
+    render();
+
+    if (state.selectedRequestId) {
+      void loadTrace(state.selectedRequestId);
+    }
+  }
+
+  function asArray(body, keys) {
+    if (Array.isArray(body)) {
+      return body;
+    }
+
+    if (!body || typeof body !== "object") {
+      return [];
+    }
+
+    for (const key of keys) {
+      if (Array.isArray(body[key])) {
+        return body[key];
+      }
+    }
+
+    return [];
+  }
+
+  function normaliseCapabilities(body) {
+    return asArray(body, ["capabilities", "items", "data"]).filter(
+      (item) => item && typeof item === "object",
+    );
+  }
+
+  function normaliseApprovals(body) {
+    return asArray(body, ["approvals", "items", "data"]).filter(
+      (item) => item && typeof item === "object",
+    );
+  }
+
+  function normaliseAudit(body) {
+    return asArray(body, ["entries", "trail", "audit", "items", "data", "log"]).filter(
+      (item) => item && typeof item === "object",
+    );
+  }
+
+  function readChainMeta(body, entries) {
+    const head =
+      (body && typeof body === "object" && (body.head || body.chain)) || null;
+
+    const newest = entries.length
+      ? entries.reduce((a, b) => ((a.seq || 0) > (b.seq || 0) ? a : b))
+      : null;
+
+    return {
+      headHash:
+        (head && (head.hash || head.headHash)) ||
+        (newest && newest.entryHash) ||
+        null,
+      seq: (head && head.seq) || (newest && newest.seq) || null,
+      count:
+        (body && typeof body === "object" && typeof body.count === "number"
+          ? body.count
+          : null) ?? null,
+    };
+  }
+
+  /**
+   * The feed is rebuilt from the audit chain rather than accumulated, so a page
+   * reload shows the same history the server has — and so the panel works
+   * identically whether or not the SSE stream is wired.
+   */
+  function rebuildFeedFromAudit() {
+    if (state.audit === "MISSING" || !Array.isArray(state.audit)) {
+      return;
+    }
+
+    const byRequest = new Map();
+
+    for (const entry of state.audit) {
+      const requestId = entry.requestId || entry.request_id;
+
+      if (!requestId) {
+        continue;
+      }
+
+      const existing = byRequest.get(requestId);
+
+      if (!existing || (entry.seq || 0) > (existing.seq || 0)) {
+        byRequest.set(requestId, entry);
+      }
+    }
+
+    const live = new Map(state.feed.filter((item) => item.live).map((item) => [item.requestId, item]));
+
+    const fromAudit = [...byRequest.values()]
+      .sort((a, b) => (b.seq || 0) - (a.seq || 0))
+      .map((entry) => ({
+        requestId: entry.requestId,
+        code: entry.code || null,
+        decision: verdictOf(entry),
+        reason: entry.reason || "",
+        timestamp: entry.timestamp || null,
+        agentId: entry.agentId || null,
+        capabilityId: entry.capabilityId || null,
+        seq: entry.seq || 0,
+        live: false,
+      }));
+
+    for (const item of fromAudit) {
+      live.delete(item.requestId);
+    }
+
+    state.feed = [...live.values(), ...fromAudit].slice(0, 80);
+  }
+
+  async function loadTrace(requestId) {
+    const result = await api(`/audit/${encodeURIComponent(requestId)}`);
+
+    if (result.ok) {
+      state.trace = normaliseAudit(result.body);
+      state.traceRequestId = requestId;
+    } else if (result.routeMissing) {
+      state.trace = "MISSING";
+      state.traceRequestId = requestId;
+    }
+
+    render();
+  }
+
+  async function verifyChain() {
+    state.verifying = true;
+    render();
+
+    const result = await api("/audit/verify");
+
+    state.verifying = false;
+
+    if (result.routeMissing) {
+      state.verification = { missing: true };
+    } else if (result.body && typeof result.body === "object") {
+      const body = result.body;
+      state.verification = body.chain || body.verification || body;
+    } else {
+      state.verification = { error: `HTTP ${result.status}` };
+    }
+
+    render();
+  }
+
+  async function decideApproval(approvalId, action) {
+    const result = await api(
+      `/approvals/${encodeURIComponent(approvalId)}/${action}`,
+      {
+        method: "POST",
+        body: { decidedBy: "cockpit-operator", note: `via cockpit ${action}` },
+        admin: true,
+      },
+    );
+
+    if (!result.ok) {
+      const detail =
+        (result.body && (result.body.reason || result.body.message)) ||
+        (result.routeMissing ? "route not implemented" : `HTTP ${result.status}`);
+
+      showBanner(
+        `Could not ${action} ${shortHash(approvalId, 6)}: ${detail}${
+          result.status === 401 || result.status === 403
+            ? " — paste the admin token into the header field."
+            : ""
+        }`,
+      );
+    }
+
+    await refreshAll();
+  }
+
+  let bannerTimer = null;
+
+  function showBanner(message) {
+    const banner = $("banner");
+
+    banner.textContent = message;
+    banner.hidden = false;
+
+    if (bannerTimer) {
+      clearTimeout(bannerTimer);
+    }
+
+    bannerTimer = setTimeout(() => {
+      banner.hidden = true;
+    }, 9000);
+  }
+
+  // --- SSE -----------------------------------------------------------
+
+  let stream = null;
+  let streamTimer = null;
+
+  /**
+   * The event names the server actually publishes.
+   *
+   * EventSource has no wildcard subscription, so every name has to be named.
+   * `onmessage` is also kept for an unnamed event, and each handler re-derives
+   * the type from the payload, so a name added on the server side still renders
+   * (as a pipeline entry) even before this list is updated.
+   */
+  const STREAM_EVENTS = [
+    "intent.received",
+    "policy.evaluated",
+    "firewall.checked",
+    "capability.created",
+    "capability.revoked",
+    "approval.created",
+    "approval.pending_human",
+    "approval.human_granted",
+    "approval.human_denied",
+    "signing.refused",
+    "signing.started",
+    "signing.succeeded",
+    "signing.failed",
+  ];
+
+  /** event type -> [pipeline stage, status] */
+  const EVENT_STAGES = {
+    "intent.received": ["NORMALIZE", "PASS"],
+    "policy.evaluated": ["POLICY", null],
+    "firewall.checked": ["FIREWALL", null],
+    "approval.created": ["APPROVAL", "PASS"],
+    "approval.pending_human": ["APPROVAL", "ESCALATE"],
+    "approval.human_granted": ["APPROVAL", "PASS"],
+    "approval.human_denied": ["APPROVAL", "FAIL"],
+    "signing.started": ["SIGNER", "PASS"],
+    "signing.succeeded": ["SIGNER", "PASS"],
+    "signing.failed": ["SIGNER", "FAIL"],
+    "signing.refused": ["SIGNER", "FAIL"],
+  };
+
+  const DECISION_EVENTS = new Set([
+    "policy.evaluated",
+    "firewall.checked",
+    "approval.created",
+    "approval.pending_human",
+    "approval.human_granted",
+    "approval.human_denied",
+    "signing.refused",
+    "signing.succeeded",
+    "signing.failed",
+  ]);
+
+  const REFRESH_EVENTS = new Set([
+    "capability.created",
+    "capability.revoked",
+    "approval.created",
+    "approval.pending_human",
+    "approval.human_granted",
+    "approval.human_denied",
+    "signing.succeeded",
+    "signing.failed",
+  ]);
+
+  function resetStream() {
+    if (stream) {
+      stream.close();
+      stream = null;
+    }
+
+    state.streamState = "probing";
+    connectStream();
+  }
+
+  function connectStream() {
+    if (typeof EventSource === "undefined") {
+      state.streamState = "unsupported";
+      return;
+    }
+
+    try {
+      stream = new EventSource(`${config.base}/events/stream`);
+    } catch {
+      state.streamState = "unavailable";
+      render();
+      return;
+    }
+
+    stream.onopen = () => {
+      state.streamState = "live";
+      render();
+    };
+
+    // A missing /events/stream route surfaces here as a generic error rather
+    // than a 404, and EventSource retries forever. So failures are counted and
+    // the stream is abandoned after a few: the header then says "polling", which
+    // is the truth, and the audit poll keeps the feed current either way.
+    let failures = 0;
+
+    stream.onerror = () => {
+      failures += 1;
+      state.streamState = "polling";
+
+      if (failures >= 3 && stream) {
+        stream.close();
+        stream = null;
+        state.streamState = "unavailable";
+      }
+
+      render();
+    };
+
+    stream.onmessage = (event) => handleStreamEvent(event);
+
+    for (const name of STREAM_EVENTS) {
+      stream.addEventListener(name, (event) => handleStreamEvent(event, name));
+    }
+
+    if (streamTimer) {
+      clearTimeout(streamTimer);
+    }
+
+    streamTimer = setTimeout(() => {
+      if (state.streamState === "probing") {
+        state.streamState = "polling";
+        render();
+      }
+    }, 6000);
+  }
+
+  function handleStreamEvent(event, name) {
+    let envelope = null;
+
+    try {
+      envelope = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+
+    if (!envelope || typeof envelope !== "object") {
+      return;
+    }
+
+    state.streamState = "live";
+
+    const type = envelope.type || name || "unknown";
+    const data =
+      envelope.data && typeof envelope.data === "object" ? envelope.data : envelope;
+    const at = envelope.at
+      ? Math.floor(envelope.at / 1000)
+      : Math.floor(Date.now() / 1000);
+
+    const requestId = data.requestId || null;
+
+    // Risk travels with the firewall event, score and signals together.
+    if (requestId && (typeof data.riskScore === "number" || data.riskSignals)) {
+      state.liveRisk.set(requestId, {
+        score: typeof data.riskScore === "number" ? data.riskScore : null,
+        signals: Array.isArray(data.riskSignals) ? data.riskSignals : [],
+      });
+    }
+
+    // The recipient only appears on the wire; the stored approval does not carry
+    // it, so it is cached here to give the human queue something to show.
+    if (data.to) {
+      if (requestId) {
+        state.recipientByRequest.set(requestId, data.to);
+      }
+
+      if (data.approvalId) {
+        state.recipientByApproval.set(data.approvalId, data.to);
+      }
+    }
+
+    if (requestId) {
+      const mapping = EVENT_STAGES[type];
+
+      if (mapping) {
+        const [stage, fixedStatus] = mapping;
+
+        const status =
+          fixedStatus ||
+          (data.decision === "ALLOW"
+            ? "PASS"
+            : data.decision === "ESCALATE"
+              ? "ESCALATE"
+              : data.decision === "DENY"
+                ? "FAIL"
+                : "PASS");
+
+        const stages = state.livePipeline.get(requestId) || [];
+
+        stages.push({
+          requestId,
+          stage,
+          status,
+          code: data.code || null,
+          reason: data.reason || null,
+          type,
+        });
+
+        state.livePipeline.set(requestId, stages);
+      }
+    }
+
+    if (requestId && DECISION_EVENTS.has(type)) {
+      const decision =
+        data.decision === "ALLOW" || data.decision === "DENY" || data.decision === "ESCALATE"
+          ? data.decision
+          : type === "approval.pending_human"
+            ? "ESCALATE"
+            : type === "signing.succeeded" || type === "approval.created" || type === "approval.human_granted"
+              ? "ALLOW"
+              : type === "signing.refused" || type === "signing.failed" || type === "approval.human_denied"
+                ? "DENY"
+                : verdictOf(data);
+
+      state.feed = [
+        {
+          requestId,
+          code: data.code || data.policyCode || null,
+          decision,
+          reason: data.reason || type,
+          timestamp: at,
+          agentId: data.agentId || null,
+          capabilityId: data.capabilityId || null,
+          seq: envelope.seq ? Number.MAX_SAFE_INTEGER - 1 + 0 : 0,
+          live: true,
+        },
+        ...state.feed.filter((item) => item.requestId !== requestId),
+      ].slice(0, 80);
+
+      if (!state.selectedRequestId) {
+        state.selectedRequestId = requestId;
+        void loadTrace(requestId);
+      }
+    }
+
+    if (REFRESH_EVENTS.has(type)) {
+      void refreshAll();
+      return;
+    }
+
+    render();
+  }
+
+  // --- renderers -----------------------------------------------------
+
+  /** Re-rendering wholesale every few seconds would otherwise fight the
+   * operator's scroll position in the feed and the approval queue. */
+  function render() {
+    const scrolls = [...document.querySelectorAll(".scroll")].map((node) => [
+      node,
+      node.scrollTop,
+    ]);
+
+    renderHeader();
+    renderCapability();
+    renderRisk();
+    renderDevice();
+    renderFeed();
+    renderTrace();
+    renderQueue();
+    renderChain();
+    renderIntegrations();
+
+    for (const [node, top] of scrolls) {
+      if (node.isConnected) {
+        node.scrollTop = top;
+      }
+    }
+  }
+
+  function renderHeader() {
+    const dot = $("dot");
+    const text = $("conn-text");
+
+    if (state.reachable === true) {
+      dot.className = "dot up";
+      text.textContent = `connected${config.base ? ` — ${config.base}` : ""}`;
+    } else if (state.reachable === false) {
+      dot.className = "dot";
+      text.textContent = "API unreachable";
+    } else {
+      dot.className = "dot warn";
+      text.textContent = "connecting";
+    }
+
+    const streamBadge = $("stream-state");
+
+    streamBadge.textContent = `STREAM: ${state.streamState}`;
+    streamBadge.className = `tag ${
+      state.streamState === "live" ? "t-allow" : "t-idle"
+    }`;
+
+    const signerMode = readSignerMode();
+    const badge = $("signer-badge");
+
+    badge.textContent = `SIGNER: ${signerMode.label}`;
+    badge.className = `tag ${signerMode.mock ? "t-escalate" : "t-info"}`;
+
+    if (state.reachable === false) {
+      showUnreachable();
+    }
+  }
+
+  let unreachableShown = false;
+
+  function showUnreachable() {
+    if (unreachableShown) {
+      return;
+    }
+
+    unreachableShown = true;
+    showBanner(
+      `Cannot reach the Arx API at ${config.base || location.origin}. Start it with "bun run dev" — this page keeps retrying and shows the last data it had.`,
+    );
+
+    setTimeout(() => {
+      unreachableShown = false;
+    }, 12000);
+  }
+
+  function readSignerMode() {
+    const signer = state.signer;
+
+    if (!signer || typeof signer !== "object") {
+      return { label: "unknown", mock: false, raw: null };
+    }
+
+    const inner = signer.signer && typeof signer.signer === "object" ? signer.signer : signer;
+    const label = inner.mode || inner.adapter || inner.name || "unknown";
+
+    return {
+      label: String(label),
+      mock: /mock/i.test(String(label)) || inner.mock === true,
+      raw: inner,
+    };
+  }
+
+  // -- agent & capability
+
+  function renderCapability() {
+    const rows = $("cap-rows");
+    const spend = $("spend-block");
+    const picker = $("cap-picker");
+
+    if (state.capabilities === "MISSING") {
+      rows.innerHTML = missingNote("GET /capabilities", "Capability list");
+      spend.innerHTML = "";
+      picker.innerHTML = "";
+      return;
+    }
+
+    if (!state.capabilities.length) {
+      // "Nothing granted" and "we could not ask" are different facts, and the
+      // panel must not report the first when the second is true.
+      rows.innerHTML =
+        state.reachable === false
+          ? `<div class="missing">API unreachable \u2014 no capability data has been received yet.</div>`
+          : `<div class="empty">No capabilities issued. Seed the demo set with <span class="mono">bun run scripts/seed.ts</span>.</div>`;
+      spend.innerHTML = "";
+      picker.innerHTML = "";
+      return;
+    }
+
+    const capability =
+      state.capabilities.find(
+        (item) => item.capabilityId === state.selectedCapabilityId,
+      ) || state.capabilities[0];
+
+    const limits = capability.limits || {};
+    const approval = capability.humanApproval || {};
+    const recipients = capability.recipients || {};
+
+    const statusTag =
+      capability.status === "ACTIVE"
+        ? `<span class="tag t-allow">ACTIVE</span>`
+        : `<span class="tag t-deny">${html(capability.status || "UNKNOWN")}</span>`;
+
+    const expiresIn = capability.expiresAt
+      ? Math.round(capability.expiresAt - Date.now() / 1000)
+      : null;
+
+    rows.innerHTML = [
+      row("Agent", `<span class="mono">${html(capability.agentId)}</span>`),
+      row(
+        "Capability",
+        `<span class="mono">${html(capability.capabilityId)}</span> ${statusTag}`,
+      ),
+      capability.label ? row("Purpose", html(capability.label)) : "",
+      row(
+        "May do",
+        `${html((capability.allowedActions || []).join(", ") || "—")} <span class="muted">on</span> ${html((capability.allowedProtocols || []).join(", ") || "—")}`,
+      ),
+      row(
+        "Chains",
+        `<span class="mono">${html((capability.allowedChains || []).join(", ") || "—")}</span>`,
+      ),
+      row(
+        "Recipients",
+        recipients.mode === "ANY"
+          ? `<span class="tag t-escalate">ANY</span> <span class="muted">deny-list only</span>`
+          : (recipients.allow || []).length
+            ? (recipients.allow || [])
+                .map(
+                  (address) =>
+                    `<div class="mono">${html(shortHash(address, 8))}</div>`,
+                )
+                .join("")
+            : `<span class="tag t-deny">EMPTY ALLOWLIST</span> <span class="muted">permits nothing</span>`,
+      ),
+      row(
+        "Per-tx ceiling",
+        `${html(usd(capability.maxAmountUsd) || "—")} <span class="muted">/</span> <span class="mono">${html(weiToEth(limits.maxValueWei))} ETH</span>`,
+      ),
+      row(
+        "Escalates above",
+        approval.alwaysRequired
+          ? `<span class="tag t-escalate">EVERY ACTION</span>`
+          : approval.requiredAboveUsd
+            ? `${html(usd(approval.requiredAboveUsd))} <span class="muted">or risk ≥ ${html(approval.requiredAboveRiskScore)}</span>`
+            : `<span class="muted">no USD threshold — risk ≥ ${html(approval.requiredAboveRiskScore)}</span>`,
+      ),
+      row(
+        "Expires",
+        expiresIn === null
+          ? "—"
+          : expiresIn > 0
+            ? `<span class="muted">in</span> ${html(humanDuration(expiresIn))}`
+            : `<span class="tag t-deny">EXPIRED</span>`,
+      ),
+    ]
+      .filter(Boolean)
+      .join("");
+
+    spend.innerHTML = renderSpend(capability);
+
+    picker.innerHTML =
+      state.capabilities.length > 1
+        ? `<label class="muted" style="font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase">Inspect grant</label>
+           <select id="cap-select" style="width:100%;margin-top:6px;background:#0b1118;border:1px solid var(--line-strong);border-radius:6px;color:var(--text);padding:8px;font-family:var(--mono);font-size:12.5px">
+             ${state.capabilities
+               .map(
+                 (item) =>
+                   `<option value="${html(item.capabilityId)}" ${item.capabilityId === capability.capabilityId ? "selected" : ""}>${html(item.capabilityId)} — ${html(item.status)}</option>`,
+               )
+               .join("")}
+           </select>`
+        : "";
+
+    const select = $("cap-select");
+
+    if (select) {
+      select.addEventListener("change", (event) => {
+        state.selectedCapabilityId = event.target.value;
+        render();
+      });
+    }
+  }
+
+  function row(key, value) {
+    return `<div class="row"><div class="k">${html(key)}</div><div class="v">${value}</div></div>`;
+  }
+
+  function weiToEth(wei) {
+    if (typeof wei !== "string" || !/^\d+$/.test(wei)) {
+      return "—";
+    }
+
+    try {
+      const value = BigInt(wei);
+      const whole = value / 10n ** 18n;
+      const fraction = (value % 10n ** 18n).toString().padStart(18, "0");
+
+      return `${whole}.${fraction.slice(0, 4)}`;
+    } catch {
+      return "—";
+    }
+  }
+
+  function humanDuration(seconds) {
+    const value = Math.abs(seconds);
+
+    if (value < 90) {
+      return `${Math.round(value)}s`;
+    }
+
+    if (value < 5400) {
+      return `${Math.round(value / 60)}m`;
+    }
+
+    if (value < 172800) {
+      return `${Math.round(value / 3600)}h`;
+    }
+
+    return `${Math.round(value / 86400)}d`;
+  }
+
+  /**
+   * The spend window.
+   *
+   * If the server reports usage, that is shown and labelled as reported. If it
+   * does not, the figure is derived here from the approvals the API returned and
+   * labelled as derived — an approximation of the authority already committed,
+   * not the ledger itself.
+   */
+  function renderSpend(capability) {
+    const limits = capability.limits || {};
+    const limit = Number(limits.maxAmountUsdPerWindow || 0);
+    const windowSeconds = Number(limits.windowSeconds || 86400);
+
+    // The list endpoint returns grants without usage; the detail endpoint
+    // returns the spend ledger's own figure. Prefer the ledger, and say so.
+    const detail =
+      state.capabilityDetail &&
+      state.capabilityDetail.capability &&
+      state.capabilityDetail.capability.capabilityId === capability.capabilityId
+        ? state.capabilityDetail
+        : null;
+
+    const reported =
+      (detail && detail.spendWindow) ||
+      capability.spend ||
+      capability.spendWindow ||
+      (capability.window && typeof capability.window === "object"
+        ? capability.window
+        : null);
+
+    let used = null;
+    let source = "derived from GET /approvals";
+    let count = null;
+
+    if (reported && typeof reported === "object") {
+      const candidate =
+        reported.usedUsd ?? reported.amountUsd ?? reported.spentUsd ?? null;
+
+      if (typeof candidate === "number") {
+        used = candidate;
+        source = "reported by the server\u0027s spend ledger";
+        count =
+          reported.transactionCount ?? reported.txCount ?? reported.count ?? null;
+      }
+    }
+
+    if (used === null) {
+      if (state.approvals === "MISSING") {
+        return `<div class="missing">Spend window cannot be shown: neither <span class="mono">GET /capabilities/:id</span> nor <span class="mono">GET /approvals</span> reports usage.</div>`;
+      }
+
+      const cutoff = Date.now() / 1000 - windowSeconds;
+      const relevant = state.approvals.filter(
+        (item) =>
+          item.capabilityId === capability.capabilityId &&
+          (item.createdAt || 0) >= cutoff &&
+          ["PENDING_HUMAN", "APPROVED", "SIGNING", "CONSUMED"].includes(
+            item.status,
+          ),
+      );
+
+      used = relevant.reduce((total, item) => total + (item.valueUsd || 0), 0);
+      count = relevant.length;
+    }
+
+    if (!limit) {
+      return `<div class="rows">${row(
+        "Spend window",
+        `<span class="tag t-idle">NO BUDGET SET</span> <span class="muted">committed ${html(usd(used) || "$0.00")} in the last ${html(humanDuration(windowSeconds))}</span>`,
+      )}</div>`;
+    }
+
+    const ratio = Math.max(0, Math.min(1, used / limit));
+    const percent = Math.round(ratio * 100);
+    const klass = ratio >= 0.9 ? "crit" : ratio >= 0.65 ? "hot" : "";
+
+    return `
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:6px">
+        <strong style="font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:#c7d7e6">Spend window</strong>
+        <span class="mono" style="font-size:13px">${html(usd(used))} / ${html(usd(limit))}</span>
+      </div>
+      <div class="meter ${klass}"><i style="width:${percent}%"></i></div>
+      <div class="muted" style="font-size:12px;margin-top:6px">
+        ${percent}% of a ${html(humanDuration(windowSeconds))} budget used${count === null ? "" : ` across ${html(count)} approval(s)`}
+        &middot; ${html(usd(Math.max(0, limit - used)))} remaining
+        &middot; <span style="color:#87a0b8">${html(source)}</span>
+      </div>`;
+  }
+
+  // -- risk
+
+  function renderRisk() {
+    const body = $("risk-body");
+    const source = $("risk-src");
+    const requestId = state.selectedRequestId;
+
+    const live = requestId ? state.liveRisk.get(requestId) : null;
+    const fromTrace = extractRiskFromTrace();
+    const risk = live || fromTrace;
+
+    source.textContent = requestId
+      ? `request ${shortHash(requestId, 5)}`
+      : "no request selected";
+
+    if (!requestId) {
+      body.innerHTML = `<div class="empty">Select a decision in the feed to see the risk signals that produced its score.</div>`;
+      return;
+    }
+
+    if (!risk) {
+      body.innerHTML = `<div class="empty">No risk assessment recorded for this request. If the request was refused before the risk stage, that is expected — checks stop at the first denial.</div>`;
+      return;
+    }
+
+    const score = typeof risk.score === "number" ? risk.score : null;
+    const signals = Array.isArray(risk.signals) ? risk.signals : [];
+    const ratio = score === null ? 0 : Math.max(0, Math.min(1, score / 100));
+    const klass = ratio >= 0.8 ? "crit" : ratio >= 0.6 ? "hot" : "";
+
+    body.innerHTML = `
+      <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px">
+        <div style="font-size:34px;font-weight:800;line-height:1">${score === null ? "—" : html(score)}</div>
+        <div class="muted" style="font-size:12px">/ 100 risk score</div>
+      </div>
+      <div class="meter ${klass}"><i style="width:${Math.round(ratio * 100)}%"></i></div>
+      ${
+        signals.length === 0
+          ? `<div class="missing" style="margin-top:12px">Score reported with no contributing signals. A score without signals is not auditable — the API should return every signal with its weight and explanation.</div>`
+          : `<div style="margin-top:10px">${signals
+              .map(
+                (signal) => `
+                  <div class="signal">
+                    <div class="h">
+                      <span class="w">+${html(signal.weight ?? 0)}</span>
+                      <span class="i">${html(signal.id || "UNNAMED_SIGNAL")}</span>
+                    </div>
+                    <div class="e">${html(signal.explanation || "no explanation provided")}</div>
+                  </div>`,
+              )
+              .join("")}</div>`
+      }`;
+  }
+
+  function extractRiskFromTrace() {
+    if (!Array.isArray(state.trace)) {
+      return null;
+    }
+
+    for (const entry of state.trace) {
+      if (entry.eventType !== "RISK_SCORED") {
+        continue;
+      }
+
+      const payload = entry.payload || {};
+
+      return {
+        score:
+          typeof payload.score === "number"
+            ? payload.score
+            : typeof payload.riskScore === "number"
+              ? payload.riskScore
+              : null,
+        signals: Array.isArray(payload.signals) ? payload.signals : [],
+      };
+    }
+
+    return null;
+  }
+
+  // -- device
+
+  function renderDevice() {
+    const body = $("device-body");
+    const mode = readSignerMode();
+
+    if (!state.signer) {
+      body.innerHTML = missingNote("GET /signer", "Signer status");
+      return;
+    }
+
+    const inner = mode.raw || {};
+    const screens = Array.isArray(inner.screens)
+      ? inner.screens
+      : Array.isArray(state.signer.screens)
+        ? state.signer.screens
+        : null;
+
+    body.innerHTML = `
+      ${
+        mode.mock
+          ? `<div class="mockstrip">MOCK &mdash; not a real signature.<br /><span style="font-weight:600;font-size:12.5px">No hardware device is attached and nothing here is broadcastable.</span></div>`
+          : ""
+      }
+      <div class="rows">
+        ${row("Mode", `<span class="tag ${mode.mock ? "t-escalate" : "t-info"}">${html(mode.label)}</span>`)}
+        ${row("Address", `<span class="mono">${html(inner.address ? shortHash(inner.address, 10) : "—")}</span>`)}
+        ${row("Derivation", `<span class="mono">${html(inner.derivationPath || inner.path || "—")}</span>`)}
+        ${row("Available", inner.available === false ? `<span class="tag t-deny">NO</span>` : inner.available === true ? `<span class="tag t-allow">YES</span>` : `<span class="muted">not reported</span>`)}
+      </div>
+      <div style="margin-top:12px">
+        <div class="muted" style="font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;margin-bottom:6px">Device screens</div>
+        ${
+          screens && screens.length
+            ? `<div class="screens">${screens
+                .map((screen, index) =>
+                  typeof screen === "string"
+                    ? `<div class="screen"><b>SCREEN ${index + 1}</b>${html(screen)}</div>`
+                    : `<div class="screen"><b>${html(screen.title || `SCREEN ${index + 1}`)}</b>${html(
+                        Array.isArray(screen.lines)
+                          ? screen.lines.join("\n")
+                          : screen.text || JSON.stringify(screen),
+                      )}</div>`,
+                )
+                .join("")}</div>`
+            : `<div class="empty">No screens captured. ${mode.mock ? "The mock signer has no display; run with SIGNER_MODE=speculos to capture real device screens." : "The signer reported no screen capture for the last signature."}</div>`
+        }
+      </div>`;
+  }
+
+  // -- feed
+
+  function renderFeed() {
+    const feed = $("feed");
+
+    $("feed-src").textContent =
+      state.streamState === "live" ? "SSE /events/stream" : "GET /audit (polled)";
+
+    if (state.audit === "MISSING") {
+      feed.innerHTML = `<div class="body">${missingNote("GET /audit", "Decision history")}</div>`;
+      return;
+    }
+
+    if (!state.feed.length) {
+      feed.innerHTML =
+        state.reachable === false
+          ? `<div class="body"><div class="missing">API unreachable \u2014 showing no decisions because none have been read, not because none were made.</div></div>`
+          : `<div class="body"><div class="empty">No decisions yet. Run <span class="mono">bun run scripts/demo.ts</span> or <span class="mono">bun run scripts/attack.ts</span> and they will appear here.</div></div>`;
+      return;
+    }
+
+    feed.innerHTML = state.feed
+      .map(
+        (item) => `
+          <button class="feed-item ${item.requestId === state.selectedRequestId ? "sel" : ""}" data-request="${html(item.requestId)}">
+            <div>
+              ${verdictTag(item.decision)}
+              <div class="when">${html(clock(item.timestamp))}</div>
+            </div>
+            <div>
+              <div class="code">${html(item.code || "—")}</div>
+              <div class="why">${html(item.reason || "no reason recorded")}</div>
+              <div class="when">${html(shortHash(item.requestId, 6))}${item.capabilityId ? ` &middot; ${html(item.capabilityId)}` : ""}</div>
+            </div>
+          </button>`,
+      )
+      .join("");
+
+    for (const node of feed.querySelectorAll(".feed-item")) {
+      node.addEventListener("click", () => {
+        state.selectedRequestId = node.dataset.request;
+        state.trace = null;
+        render();
+        void loadTrace(node.dataset.request);
+      });
+    }
+  }
+
+  // -- pipeline trace
+
+  /**
+   * The panel that explains the product.
+   *
+   * Seven fixed stages are always rendered in order, whether or not the request
+   * reached them, because the shape of the pipeline is the thing being
+   * explained. A stage the request never reached is drawn as "not reached" —
+   * which is itself the point: checks stop at the first denial, so an early
+   * refusal means the expensive later checks never ran.
+   */
+  const STAGES = [
+    {
+      key: "NORMALIZE",
+      name: "Normalize",
+      hint: "canonical bytes, deterministic id",
+      events: ["INTENT_RECEIVED"],
+    },
+    {
+      key: "CAPABILITY",
+      name: "Capability",
+      hint: "does this grant exist, and is it live",
+      events: ["CAPABILITY_RESOLVED"],
+    },
+    {
+      key: "POLICY",
+      name: "Policy",
+      hint: "is the intent inside the granted authority",
+      events: ["POLICY_EVALUATED"],
+    },
+    {
+      key: "FIREWALL",
+      name: "Firewall",
+      hint: "do the transaction bytes agree with the claim",
+      events: ["FIREWALL_CHECKED"],
+    },
+    {
+      key: "RISK",
+      name: "Risk",
+      hint: "explainable score from named signals",
+      events: ["RISK_SCORED"],
+    },
+    {
+      key: "APPROVAL",
+      name: "Approval",
+      hint: "artifact bound to the exact transaction",
+      events: [
+        "APPROVAL_CREATED",
+        "HUMAN_APPROVAL_REQUESTED",
+        "HUMAN_APPROVAL_GRANTED",
+        "HUMAN_APPROVAL_DENIED",
+      ],
+    },
+    {
+      key: "SIGNER",
+      name: "Signer",
+      hint: "the boundary the agent cannot cross",
+      events: [
+        "SIGNING_STARTED",
+        "SIGNING_SUCCEEDED",
+        "SIGNING_FAILED",
+        "SIGNATURE_VERIFIED",
+      ],
+    },
+  ];
+
+  function renderTrace() {
+    const head = $("trace-head");
+    const stages = $("trace-stages");
+    const requestId = state.selectedRequestId;
+
+    if (!requestId) {
+      head.innerHTML = "";
+      stages.innerHTML = `<div class="empty">Select a decision in the feed. Every stage of its authorization — normalize, capability, policy, firewall, risk, approval, signer — is shown here with the reason it passed or failed.</div>`;
+      return;
+    }
+
+    const entries = Array.isArray(state.trace) ? state.trace : [];
+    const livePipeline = state.livePipeline.get(requestId) || [];
+    const feedItem = state.feed.find((item) => item.requestId === requestId);
+
+    head.innerHTML = [
+      row("Request", `<span class="mono">${html(requestId)}</span>`),
+      feedItem
+        ? row(
+            "Outcome",
+            `${verdictTag(feedItem.decision)} <span class="mono">${html(feedItem.code || "—")}</span>`,
+          )
+        : "",
+      row(
+        "Recorded",
+        state.trace === "MISSING"
+          ? `<span class="missing">GET /audit/:requestId not available</span>`
+          : `${html(entries.length)} audit entr${entries.length === 1 ? "y" : "ies"}${livePipeline.length ? ` &middot; ${html(livePipeline.length)} live stage event(s)` : ""}`,
+      ),
+    ]
+      .filter(Boolean)
+      .join("");
+
+    if (state.trace === "MISSING" && livePipeline.length === 0) {
+      stages.innerHTML = missingNote(
+        "GET /audit/:requestId",
+        "Per-request pipeline trace",
+      );
+      return;
+    }
+
+    stages.innerHTML = STAGES.map((stage) => {
+      const matching = entries.filter((entry) =>
+        stage.events.includes(entry.eventType),
+      );
+      const liveMatch = livePipeline.filter((item) => item.stage === stage.key);
+
+      let status = "skip";
+      let detail = `<span class="muted">not reached</span>`;
+
+      if (liveMatch.length) {
+        const last = liveMatch[liveMatch.length - 1];
+
+        status =
+          last.status === "PASS"
+            ? "pass"
+            : last.status === "SKIPPED"
+              ? "skip"
+              : last.status === "ESCALATE"
+                ? "esc"
+                : "fail";
+
+        detail = `${last.code ? `<span class="c">${html(last.code)}</span> ` : ""}${html(last.reason || "")}`;
+      } else if (matching.length) {
+        const last = matching[matching.length - 1];
+        const verdict = verdictOf(last);
+
+        status =
+          verdict === "ALLOW"
+            ? "pass"
+            : verdict === "ESCALATE"
+              ? "esc"
+              : verdict === "DENY"
+                ? "fail"
+                : "pass";
+
+        if (last.eventType === "SIGNING_SUCCEEDED" || last.eventType === "SIGNATURE_VERIFIED") {
+          status = "pass";
+        }
+
+        if (last.eventType === "SIGNING_FAILED") {
+          status = "fail";
+        }
+
+        detail = `${last.code ? `<span class="c">${html(last.code)}</span> ` : ""}${html(last.reason || last.eventType)}`;
+      }
+
+      const glyph =
+        status === "pass" ? "✓" : status === "fail" ? "✕" : status === "esc" ? "!" : "·";
+
+      return `
+        <div class="stage">
+          <div class="pip ${status}">${glyph}</div>
+          <div class="name">${html(stage.name)}<span>${html(stage.hint)}</span></div>
+          <div class="detail">${detail}</div>
+        </div>`;
+    }).join("");
+  }
+
+  // -- approval queue
+
+  function renderQueue() {
+    const body = $("queue-body");
+
+    if (state.approvals === "MISSING") {
+      body.innerHTML = missingNote("GET /approvals", "Approval queue");
+      return;
+    }
+
+    const pending = state.approvals.filter(
+      (item) => item.status === "PENDING_HUMAN",
+    );
+
+    if (!pending.length) {
+      body.innerHTML = `<div class="empty">Nothing waiting on a human. Escalations appear here with everything needed to decide — recipient, amount, risk and why it escalated.</div>`;
+      return;
+    }
+
+    body.innerHTML = pending
+      .map((approval) => {
+        const transaction =
+          approval.transaction || approval.summary || approval.details || {};
+        // A stored approval does not carry the recipient, so the live stream's
+        // value is used as a labelled fallback rather than leaving the human
+        // with no idea who is being paid.
+        const streamed =
+          state.recipientByApproval.get(approval.approvalId) ||
+          state.recipientByRequest.get(approval.requestId) ||
+          null;
+
+        const direct = transaction.to || approval.recipient || approval.to;
+        const recipient = direct || streamed;
+        const recipientSource = direct
+          ? null
+          : streamed
+            ? "from the live event stream, not from the stored approval"
+            : null;
+
+        return `
+          <div class="queue-item">
+            <div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap">
+              <span class="tag t-escalate">AWAITING HUMAN</span>
+              <span class="mono" style="font-size:12.5px">${html(shortHash(approval.approvalId, 8))}</span>
+              <span class="muted" style="font-size:12px">expires ${html(approval.expiresAt ? `in ${humanDuration(approval.expiresAt - Date.now() / 1000)}` : "—")}</span>
+            </div>
+            <div class="rows" style="margin-top:10px">
+              ${row(
+                "Recipient",
+                recipient
+                  ? `<span class="mono">${html(recipient)}</span>${recipientSource ? `<br /><span class="muted" style="font-size:11.5px">${html(recipientSource)}</span>` : ""}`
+                  : `<span class="missing">not exposed by the API — GET /approvals should include the transaction summary so a human can see who is being paid</span>`,
+              )}
+              ${row("Amount", `${html(usd(approval.valueUsd) || "—")} <span class="muted">oracle-derived, not the agent's claim</span>`)}
+              ${row("Risk", `${html(approval.riskScore ?? "—")} / 100`)}
+              ${row("Why escalated", html(approval.reason || approval.policyCode || "—"))}
+              ${row("Bound to", `<span class="mono">${html(shortHash(approval.transactionHash, 10) || "—")}</span>`)}
+            </div>
+            <div class="queue-actions">
+              <button class="primary" data-approve="${html(approval.approvalId)}">Approve</button>
+              <button class="danger" data-reject="${html(approval.approvalId)}">Reject</button>
+              <button data-trace="${html(approval.requestId || "")}">Show trace</button>
+            </div>
+            ${config.token ? "" : `<div class="hint">Approve and Reject are control-plane actions. Paste the admin token into the header field first.</div>`}
+          </div>`;
+      })
+      .join("");
+
+    for (const node of body.querySelectorAll("[data-approve]")) {
+      node.addEventListener("click", () =>
+        decideApproval(node.dataset.approve, "approve"),
+      );
+    }
+
+    for (const node of body.querySelectorAll("[data-reject]")) {
+      node.addEventListener("click", () =>
+        decideApproval(node.dataset.reject, "reject"),
+      );
+    }
+
+    for (const node of body.querySelectorAll("[data-trace]")) {
+      node.addEventListener("click", () => {
+        const requestId = node.dataset.trace;
+
+        if (!requestId) {
+          showBanner(
+            "This approval does not carry a requestId, so its pipeline trace cannot be looked up.",
+          );
+          return;
+        }
+
+        state.selectedRequestId = requestId;
+        state.trace = null;
+        render();
+        void loadTrace(requestId);
+      });
+    }
+  }
+
+  // -- audit chain
+
+  function renderChain() {
+    const body = $("chain-body");
+    const chain = state.chain || {};
+    const verification = state.verification;
+
+    let verdict = `<span class="tag t-idle">NOT VERIFIED</span>`;
+
+    if (state.verifying) {
+      verdict = `<span class="tag t-info">VERIFYING…</span>`;
+    } else if (verification && verification.missing) {
+      verdict = `<span class="tag t-escalate">ENDPOINT MISSING</span>`;
+    } else if (verification && verification.valid === true) {
+      verdict = `<span class="tag t-allow">CHAIN INTACT</span>`;
+    } else if (verification && verification.valid === false) {
+      verdict = `<span class="tag t-deny">BROKEN AT SEQ ${html(verification.brokenAtSeq ?? "?")}</span>`;
+    } else if (verification && verification.error) {
+      verdict = `<span class="tag t-deny">${html(verification.error)}</span>`;
+    }
+
+    body.innerHTML = `
+      <div class="rows">
+        ${row("State", verdict)}
+        ${row("Head hash", `<span class="mono">${html(shortHash(chain.headHash, 12) || "—")}</span>`)}
+        ${row("Entries", `<span class="mono">${html(verification && typeof verification.entries === "number" ? verification.entries : (chain.seq ?? chain.count ?? "—"))}</span>`)}
+        ${
+          verification && verification.valid === false
+            ? row(
+                "Break",
+                `<span class="mono">${html(verification.problem || "MISMATCH")}</span><br /><span class="muted" style="font-size:12px">expected ${html(shortHash(verification.expected, 8))}<br />found &nbsp;&nbsp;&nbsp;${html(shortHash(verification.found, 8))}</span>`,
+              )
+            : ""
+        }
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+        <button id="verify-btn">Verify chain</button>
+      </div>
+      <div class="hint">
+        To prove tamper-evidence by hand, edit a historical entry out of band and press Verify.
+        <code>sqlite3 ${html((state.health && (state.health.databasePath || state.health.database)) || "./data/arx.sqlite")} \\
+  "UPDATE audit_chain SET reason='redacted' WHERE seq=3;"</code>
+        The suite does this automatically and reverts it: <span class="mono">bun run scripts/demo.ts --only audit-tamper</span>
+      </div>`;
+
+    $("verify-btn").addEventListener("click", () => void verifyChain());
+  }
+
+  // -- integrations
+
+  function renderIntegrations() {
+    const body = $("integrations-body");
+
+    if (state.integrations === "MISSING") {
+      body.innerHTML = missingNote("GET /integrations", "Adapter status");
+      return;
+    }
+
+    if (!state.integrations) {
+      body.innerHTML = `<div class="empty">Waiting for adapter status…</div>`;
+      return;
+    }
+
+    const list = Array.isArray(state.integrations)
+      ? state.integrations
+      : Array.isArray(state.integrations.integrations)
+        ? state.integrations.integrations
+        : Object.entries(state.integrations).map(([name, value]) =>
+            value && typeof value === "object"
+              ? { name, ...value }
+              : { name, ready: Boolean(value) },
+          );
+
+    if (!list.length) {
+      body.innerHTML = `<div class="empty">No adapters registered.</div>`;
+      return;
+    }
+
+    body.innerHTML = `<div class="integrations" style="grid-template-columns:repeat(auto-fill,minmax(260px,1fr))">
+      ${list
+        .map((item) => {
+          const ready =
+            item.ready ?? item.live ?? item.available ?? item.isReady ?? null;
+          const tag =
+            ready === true
+              ? `<span class="tag t-allow">LIVE</span>`
+              : ready === false
+                ? `<span class="tag t-idle">DORMANT</span>`
+                : `<span class="tag t-idle">UNKNOWN</span>`;
+
+          return `
+            <div class="integration">
+              <div>
+                <div class="n">${html(item.name || item.id || "adapter")}</div>
+                <div class="d">${html(item.seam || item.kind || item.description || (ready === false ? "not configured" : ""))}</div>
+              </div>
+              ${tag}
+            </div>`;
+        })
+        .join("")}
+    </div>`;
+  }
+
+  // --- boot ----------------------------------------------------------
+
+  render();
+  void refreshAll();
+  connectStream();
+
+  // Polling continues even with a live stream: the stream carries decisions,
+  // while capability, approval and signer state are read models that can change
+  // without a decision being made.
+  setInterval(() => void refreshAll(), 4000);
+</script>
