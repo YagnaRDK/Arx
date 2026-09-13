@@ -1,566 +1,1082 @@
-import Fastify from "fastify";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
+
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
+
+import { env } from "../config/env";
+import { ArxError, isArxError } from "../core/errors";
+import { httpStatusForCode } from "../core/codes";
 
 import { CapabilityStore } from "../storage/capability-store";
 import { ReplayStore } from "../storage/replay-store";
 import { AuditStore } from "../storage/audit-store";
+import { ApprovalStore } from "../storage/approval-store";
+import { SpendStore } from "../storage/spend-store";
+import { AgentStore } from "../storage/agent-store";
+import { IdempotencyStore, hashIntentBody } from "../storage/idempotency-store";
 
-import { PolicyEngine } from "../policy/policy-engine";
+import { PolicyEngine, POLICY_VERSION } from "../policy/policy-engine";
 import { validateCapability, validateIntent } from "../policy/validators";
-
 import { TransactionNormalizer } from "../normalization/transaction-normalizer";
 import { TransactionFirewall } from "../firewall/transaction-firewall";
 
-import { MockSignerAdapter } from "../signer/mock-signer";
-import { SignerService } from "../signer/signer-service";
-
-import { env } from "../config/env";
-import { ApprovalStore } from "../storage/approval-store";
 import { ApprovalService } from "../approval/approval-service";
+import { HumanApprovalQueue } from "../approval/human-approval";
+import { ApprovalExpirySweeper } from "../approval/expiry-sweeper";
 
-import { SpeculosSignerAdapter } from "../signer/speculos-signer";
+import { createSignerService } from "../signer/signer-factory";
+import { createPriceOracle } from "../oracle/price-oracle";
+import { createAuthMiddleware, sendArxError } from "../auth/middleware";
+import { AgentAuthenticator } from "../auth/agent-auth";
+import { AdminAuthenticator } from "../auth/admin-auth";
 
-export function buildServer() {
+import { CapabilityBroker } from "../broker/capability-broker";
+import { SealedSecretStore } from "../broker/sealed-secret-store";
+
+import { intentIdentityPayload } from "../types/intent";
+import { AuthorizationPipeline } from "./pipeline";
+import { eventBus } from "./events";
+
+const SERVICE_VERSION = "1.0.0";
+
+/**
+ * Optional adapters are loaded lazily so a missing or broken one cannot stop the
+ * boot. The specifier is held in a variable deliberately: the registry is an
+ * optional module, and a static import would make the build depend on a file
+ * that is absent when no integration is configured.
+ */
+async function loadIntegrationRegistry(): Promise<{
+  describe: () => Promise<unknown>;
+} | null> {
+  const specifier = "../integrations/registry";
+
+  try {
+    const module = (await import(specifier)) as {
+      integrationRegistry?: { describe: () => Promise<unknown> };
+    };
+
+    return module.integrationRegistry ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function buildServer() {
   const app = Fastify({
-    logger: true,
+    logger: { level: env.nodeEnv === "test" ? "silent" : "info" },
+    // Arx is an authorization layer: a request body large enough to be a DoS
+    // vector has no legitimate shape here.
+    bodyLimit: 1_000_000,
   });
 
+  // ── Stores ────────────────────────────────────────────────────────────────
   const capabilityStore = new CapabilityStore();
   const replayStore = new ReplayStore();
   const auditStore = new AuditStore();
-
-  const policyEngine = new PolicyEngine();
-  const transactionNormalizer = new TransactionNormalizer();
-  const transactionFirewall = new TransactionFirewall();
-
   const approvalStore = new ApprovalStore();
+  const spendStore = new SpendStore();
+  const agentStore = new AgentStore();
+  const idempotencyStore = new IdempotencyStore();
+
+  // ── Decision layer ────────────────────────────────────────────────────────
+  const policyEngine = new PolicyEngine();
+  const normalizer = new TransactionNormalizer();
+  const priceOracle = createPriceOracle({ mode: env.priceOracleMode });
+
+  const firewall = new TransactionFirewall({
+    priceOracle,
+    spendStore,
+  });
+
+  const pipeline = new AuthorizationPipeline({
+    capabilityStore,
+    replayStore,
+    auditStore,
+    policyEngine,
+    normalizer,
+    firewall,
+    maxClockSkewSeconds: env.maxClockSkewSeconds,
+  });
+
+  // ── Approval layer ────────────────────────────────────────────────────────
   const approvalService = new ApprovalService(approvalStore);
 
-  const signerAdapter =
-    env.signerMode === "speculos"
-      ? new SpeculosSignerAdapter({
-          apiUrl: env.speculosApiUrl,
-          signerAddress: env.speculosSignerAddress,
-        })
-      : new MockSignerAdapter();
+  const humanApprovalQueue = new HumanApprovalQueue({
+    approvalStore,
+    spendStore,
+    auditStore,
+  });
 
-  const signerService = new SignerService(signerAdapter);
+  const expirySweeper = new ApprovalExpirySweeper({
+    approvalStore,
+    spendStore,
+    auditStore,
+  });
 
-  app.get("/", async () => {
-    return {
-      service: "Arx Policy Engine",
+  // ── Signer boundary ───────────────────────────────────────────────────────
+  const signerService = createSignerService(env.signerMode);
+
+  // ── Capability broker ─────────────────────────────────────────────────────
+  const sealedSecrets = new SealedSecretStore();
+  const broker = new CapabilityBroker(sealedSecrets);
+
+  // ── Auth ──────────────────────────────────────────────────────────────────
+  const auth = createAuthMiddleware({
+    agentAuthenticator: new AgentAuthenticator(agentStore),
+    adminAuthenticator: new AdminAuthenticator(),
+  });
+
+  const integrationRegistry = await loadIntegrationRegistry();
+
+  /**
+   * An unauthenticated control plane means anything that can reach the port can
+   * grant itself unlimited authority, which defeats the entire premise. It is
+   * allowed for local development, but never silently.
+   */
+  if (!env.adminToken && env.nodeEnv !== "test") {
+    app.log.warn(
+      "ARX_ADMIN_TOKEN is unset: the control plane is OPEN. Anything that can reach this port can mint capabilities. Set it before exposing Arx beyond localhost.",
+    );
+  }
+
+  if (!env.authorizationKeyPem && env.nodeEnv !== "test") {
+    app.log.warn(
+      "ARX_AUTHORIZATION_KEY_PEM is unset: an ephemeral approval-signing key was generated, so approvals will not survive a restart.",
+    );
+  }
+
+  app.setErrorHandler((error, request, reply) => {
+    if (isArxError(error)) {
+      return sendArxError(reply, error);
+    }
+
+    request.log.error(error);
+
+    return reply.code(500).send({
+      allowed: false,
+      code: "INTERNAL_ERROR",
+      reason: "An unexpected error occurred",
+    });
+  });
+
+  // ── Static dashboard ──────────────────────────────────────────────────────
+  const publicDir = resolve(process.cwd(), "public");
+
+  if (env.dashboardEnabled && existsSync(resolve(publicDir, "index.html"))) {
+    const fastifyStatic = await import("@fastify/static");
+
+    await app.register(fastifyStatic.default, {
+      root: publicDir,
+      prefix: "/",
+    });
+  } else {
+    app.get("/", async () => ({
+      service: "Arx",
+      tagline:
+        "The agent proposes. Arx authorizes. The device signs.",
+      version: SERVICE_VERSION,
+      policyVersion: POLICY_VERSION,
       status: "operational",
-      version: "0.4.0",
+    }));
+  }
+
+  // ── Observability ─────────────────────────────────────────────────────────
+  app.get("/health", async () => {
+    const chain = auditStore.verifyChain();
+
+    return {
+      status: "ok",
+      version: SERVICE_VERSION,
+      policyVersion: POLICY_VERSION,
+      signerMode: env.signerMode,
+      auditChain: chain.valid
+        ? { valid: true, entries: chain.entries }
+        : { valid: false, brokenAtSeq: chain.brokenAtSeq, problem: chain.problem },
     };
   });
 
   app.get("/signer", async () => {
-    return signerService.getSignerInfo();
-  });
-
-  app.post("/capabilities", async (request, reply) => {
-    const validation = validateCapability(request.body);
-
-    if (!validation.success) {
-      return reply.code(400).send({
-        error: "INVALID_CAPABILITY",
-        details: validation.error.flatten(),
-      });
-    }
-
-    try {
-      const capability = capabilityStore.create(validation.data);
-
-      return reply.code(201).send({
-        capability,
-      });
-    } catch (error) {
-      request.log.error(error);
-
-      return reply.code(409).send({
-        error: "CAPABILITY_ALREADY_EXISTS",
-      });
-    }
-  });
-
-  app.get<{
-    Params: {
-      capabilityId: string;
-    };
-  }>("/capabilities/:capabilityId", async (request, reply) => {
-    const capability = capabilityStore.get(request.params.capabilityId);
-
-    if (!capability) {
-      return reply.code(404).send({
-        error: "CAPABILITY_NOT_FOUND",
-      });
-    }
+    const info = await signerService.getSignerInfo();
 
     return {
-      capability,
+      ...info,
+      mode: env.signerMode,
+      derivationPath: env.signerDerivationPath,
+      // Restated at the boundary so a caller cannot miss it.
+      warning:
+        info.signatureType === "MOCK"
+          ? "MOCK signer: output is not a blockchain signature and must never be broadcast."
+          : undefined,
     };
   });
 
-  app.post<{
-    Params: {
-      capabilityId: string;
-    };
-  }>("/capabilities/:capabilityId/revoke", async (request, reply) => {
-    const revoked = capabilityStore.revoke(request.params.capabilityId);
+  app.get("/integrations", async () => {
+    const brokerStatus = await broker.status();
 
-    if (!revoked) {
-      return reply.code(404).send({
-        error: "CAPABILITY_NOT_FOUND_OR_INACTIVE",
-      });
-    }
+    const adapters = integrationRegistry
+      ? await integrationRegistry.describe()
+      : [];
 
     return {
-      capabilityId: request.params.capabilityId,
-      status: "REVOKED",
+      signer: {
+        mode: env.signerMode,
+        ...(await signerService.getSignerInfo()),
+      },
+      priceOracle: {
+        name: priceOracle.name,
+        ready: priceOracle.isReady(),
+        mode: env.priceOracleMode,
+      },
+      keyRing: brokerStatus.keyRing,
+      sealBackend: {
+        backend: brokerStatus.sealBackend,
+        hardwareRooted: brokerStatus.hardwareRooted,
+        reason: brokerStatus.sealBackendReason,
+      },
+      adapters,
     };
   });
 
-  app.post("/evaluate", async (request, reply) => {
-    const requestId = randomUUID();
-    const validation = validateIntent(request.body);
-
-    if (!validation.success) {
-      return reply.code(400).send({
-        requestId,
-        allowed: false,
-        code: "INVALID_INTENT",
-        reason: "Intent validation failed",
-        details: validation.error.flatten(),
-      });
-    }
-
-    const intent = validation.data;
-    const capability = capabilityStore.get(intent.capabilityId);
-
-    if (!capability) {
-      const result = {
-        allowed: false,
-        code: "CAPABILITY_NOT_FOUND" as const,
-        reason: "Capability does not exist",
-      };
-
-      auditStore.write({
-        requestId,
-        intent,
-        result,
-      });
-
-      return reply.code(403).send({
-        requestId,
-        ...result,
-      });
-    }
-
-    const isReplay = replayStore.hasBeenProcessed(
-      intent.capabilityId,
-      intent.agentId,
-      intent.nonce,
-    );
-
-    const result = policyEngine.evaluate(capability, intent, isReplay);
-
-    auditStore.write({
-      requestId,
-      intent,
-      result,
+  app.get("/events/stream", async (request, reply) => {
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
     });
 
-    if (!result.allowed) {
-      return reply.code(403).send({
-        requestId,
-        ...result,
-      });
+    const send = (event: { seq: number; type: string; at: number; data: unknown }) => {
+      reply.raw.write(`id: ${event.seq}\n`);
+      reply.raw.write(`event: ${event.type}\n`);
+      reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+
+    // Replay recent events so a freshly opened dashboard is not blank.
+    for (const event of eventBus.backlog()) {
+      send(event);
     }
 
-    replayStore.markProcessed(
-      intent.capabilityId,
-      intent.agentId,
-      intent.nonce,
-    );
+    const unsubscribe = eventBus.subscribe(send);
+    const heartbeat = setInterval(() => reply.raw.write(": ping\n\n"), 15_000);
 
-    if (capability.usage === "SINGLE_USE") {
-      capabilityStore.consume(capability.capabilityId);
-    }
-
-    return reply.code(200).send({
-      requestId,
-      ...result,
+    request.raw.on("close", () => {
+      clearInterval(heartbeat);
+      unsubscribe();
     });
   });
 
-  app.post("/firewall/submit", async (request, reply) => {
-    const requestId = randomUUID();
-    const validation = validateIntent(request.body);
+  // ── Capabilities (control plane) ──────────────────────────────────────────
+  app.post(
+    "/capabilities",
+    { preHandler: auth.requireAdmin() },
+    async (request, reply) => {
+      const validation = validateCapability(request.body);
+
+      if (!validation.success) {
+        return reply.code(400).send({
+          allowed: false,
+          code: "INVALID_CAPABILITY",
+          reason: "Capability validation failed",
+          details: validation.error.flatten(),
+        });
+      }
+
+      const capability = validation.data;
+
+      if (capabilityStore.get(capability.capabilityId)) {
+        return reply.code(409).send({
+          allowed: false,
+          code: "CAPABILITY_ALREADY_EXISTS",
+          reason: `Capability "${capability.capabilityId}" already exists`,
+        });
+      }
+
+      capabilityStore.create(capability);
+
+      auditStore.append({
+        eventType: "CAPABILITY_CREATED",
+        capabilityId: capability.capabilityId,
+        agentId: capability.agentId,
+        reason: capability.label ?? "capability granted",
+        payload: {
+          maxAmountUsd: capability.maxAmountUsd,
+          recipients: capability.recipients,
+          usage: capability.usage,
+          expiresAt: capability.expiresAt,
+        },
+      });
+
+      eventBus.publish("capability.created", {
+        capabilityId: capability.capabilityId,
+        agentId: capability.agentId,
+      });
+
+      return reply.code(201).send({ capability });
+    },
+  );
+
+  app.get("/capabilities", async (request) => {
+    const query = request.query as { agentId?: string; limit?: string };
+    const limit = Math.min(Number(query.limit ?? 100) || 100, 500);
+
+    return {
+      capabilities: query.agentId
+        ? capabilityStore.listByAgent(query.agentId, limit)
+        : capabilityStore.list(limit),
+    };
+  });
+
+  app.get<{ Params: { capabilityId: string } }>(
+    "/capabilities/:capabilityId",
+    async (request, reply) => {
+      const capability = capabilityStore.get(request.params.capabilityId);
+
+      if (!capability) {
+        return reply.code(404).send({
+          allowed: false,
+          code: "CAPABILITY_NOT_FOUND",
+          reason: "Capability does not exist",
+        });
+      }
+
+      const usage = spendStore.usage(
+        capability.capabilityId,
+        capability.limits.windowSeconds,
+      );
+
+      return { capability, spendWindow: usage };
+    },
+  );
+
+  app.post<{ Params: { capabilityId: string } }>(
+    "/capabilities/:capabilityId/revoke",
+    { preHandler: auth.requireAdmin() },
+    async (request, reply) => {
+      const revoked = capabilityStore.revoke(request.params.capabilityId);
+
+      if (!revoked) {
+        return reply.code(404).send({
+          allowed: false,
+          code: "CAPABILITY_NOT_FOUND",
+          reason: "Capability does not exist or is not active",
+        });
+      }
+
+      auditStore.append({
+        eventType: "CAPABILITY_REVOKED",
+        capabilityId: request.params.capabilityId,
+        reason: "revoked by operator",
+      });
+
+      eventBus.publish("capability.revoked", {
+        capabilityId: request.params.capabilityId,
+      });
+
+      return { capabilityId: request.params.capabilityId, status: "REVOKED" };
+    },
+  );
+
+  // ── Evaluation ────────────────────────────────────────────────────────────
+
+  /** Parses and validates an intent body, throwing a specific ArxError. */
+  function parseIntent(body: unknown) {
+    const validation = validateIntent(body);
 
     if (!validation.success) {
-      return reply.code(400).send({
-        requestId,
-        allowed: false,
-        code: "INVALID_INTENT",
-        reason: "Intent validation failed",
+      throw new ArxError("INVALID_INTENT", "Intent validation failed", {
         details: validation.error.flatten(),
       });
     }
 
-    const intent = validation.data;
+    return validation.data;
+  }
 
-    if (!intent.transaction) {
-      return reply.code(400).send({
+  app.post(
+    "/evaluate",
+    { preHandler: auth.requireAgent() },
+    async (request, reply) => {
+      const requestId = randomUUID();
+      const intent = parseIntent(request.body);
+
+      const outcome = await pipeline.evaluate({
         requestId,
-        allowed: false,
-        code: "INVALID_TRANSACTION",
-        reason: "A transaction is required for firewall submission",
+        intent,
+        requireTransaction: false,
       });
-    }
 
-    const capability = capabilityStore.get(intent.capabilityId);
+      if (outcome.kind === "REJECTED") {
+        const status = outcome.result.allowed
+          ? 200
+          : httpStatusForCode(outcome.result.code);
 
-    if (!capability) {
-      const result = {
-        allowed: false,
-        code: "CAPABILITY_NOT_FOUND" as const,
-        reason: "Capability does not exist",
+        return reply.code(status).send({ requestId, ...outcome.result });
+      }
+
+      return reply.code(outcome.decision.allowed ? 200 : 403).send({
+        requestId,
+        ...outcome.decision.result,
+        decision: outcome.decision.decision,
+        riskScore: outcome.decision.riskScore,
+      });
+    },
+  );
+
+  app.post(
+    "/firewall/submit",
+    { preHandler: auth.requireAgent() },
+    async (request, reply) => {
+      const requestId = randomUUID();
+      const intent = parseIntent(request.body);
+
+      const signerInfo = await signerService.getSignerInfo();
+
+      const outcome = await pipeline.evaluate({
+        requestId,
+        intent,
+        requireTransaction: true,
+        signerAddress: signerInfo.address,
+      });
+
+      if (outcome.kind === "REJECTED") {
+        return reply
+          .code(httpStatusForCode(outcome.result.code))
+          .send({ requestId, ...outcome.result });
+      }
+
+      const { decision, transaction } = outcome;
+
+      // A dry run: it reports what would happen and consumes no authority.
+      return reply.code(decision.allowed ? 200 : httpStatusForCode(decision.result.code)).send({
+        requestId,
+        status: decision.allowed
+          ? "READY_FOR_APPROVAL"
+          : decision.decision === "ESCALATE"
+            ? "REQUIRES_HUMAN_APPROVAL"
+            : "BLOCKED",
+        decision: decision.decision,
+        ...decision.result,
+        transactionId: transaction.transactionId,
+        transaction: transaction.transaction,
+        findings: decision.findings,
+        riskScore: decision.riskScore,
+        riskSignals: decision.riskSignals,
+        valueUsd: decision.valueUsd,
+        declaredValueUsd: decision.declaredValueUsd,
+        valuePriced: decision.valuePriced,
+        decodedCall: decision.decodedCall ?? null,
+        note: "Evaluation only. No approval was created and no authority was consumed.",
+      });
+    },
+  );
+
+  // ── Approvals ─────────────────────────────────────────────────────────────
+  app.post(
+    "/approvals",
+    { preHandler: auth.requireAgent() },
+    async (request, reply) => {
+      const requestId = randomUUID();
+      const intent = parseIntent(request.body);
+
+      // Idempotency: a retried request must replay its original decision rather
+      // than mint a second authorization.
+      const intentHash = hashIntentBody(intentIdentityPayload(intent));
+
+      if (intent.intentId) {
+        const existing = idempotencyStore.begin(
+          intent.capabilityId,
+          intent.intentId,
+          intentHash,
+        );
+
+        if (existing.kind === "REPLAY") {
+          return reply
+            .code(existing.status)
+            .header("x-arx-idempotent-replay", "true")
+            .send(existing.body);
+        }
+
+        if (existing.kind === "CONFLICT") {
+          return reply.code(409).send({
+            requestId,
+            allowed: false,
+            code: "INTENT_ID_CONFLICT",
+            reason:
+              "This intentId was already used with a different payload. Use a new intentId for a new action.",
+          });
+        }
+      }
+
+      const finish = (status: number, body: Record<string, unknown>) => {
+        if (intent.intentId) {
+          idempotencyStore.complete(
+            intent.capabilityId,
+            intent.intentId,
+            status,
+            body,
+          );
+        }
+
+        return reply.code(status).send(body);
       };
 
-      auditStore.write({
+      const signerInfo = await signerService.getSignerInfo();
+
+      const outcome = await pipeline.evaluate({
         requestId,
         intent,
-        result,
+        requireTransaction: true,
+        signerAddress: signerInfo.address,
       });
 
-      return reply.code(403).send({
+      if (outcome.kind === "REJECTED") {
+        return finish(httpStatusForCode(outcome.result.code), {
+          requestId,
+          ...outcome.result,
+        });
+      }
+
+      const { decision, transaction, capability } = outcome;
+
+      // Nothing mints an approval from a denial.
+      if (decision.decision !== "ALLOW" && decision.decision !== "ESCALATE") {
+        return finish(httpStatusForCode(decision.result.code), {
+          requestId,
+          ...decision.result,
+          decision: decision.decision,
+          findings: decision.findings,
+          riskScore: decision.riskScore,
+          riskSignals: decision.riskSignals,
+        });
+      }
+
+      const replayed = pipeline.commitAuthority({ intent, capability });
+
+      if (replayed) {
+        return finish(httpStatusForCode(replayed.code), {
+          requestId,
+          ...replayed,
+        });
+      }
+
+      const approval = approvalService.createApproval({
         requestId,
-        ...result,
-      });
-    }
-
-    const isReplay = replayStore.hasBeenProcessed(
-      intent.capabilityId,
-      intent.agentId,
-      intent.nonce,
-    );
-
-    const policyResult = policyEngine.evaluate(capability, intent, isReplay);
-
-    if (!policyResult.allowed) {
-      auditStore.write({
-        requestId,
-        intent,
-        result: policyResult,
-      });
-
-      return reply.code(403).send({
-        requestId,
-        ...policyResult,
-      });
-    }
-
-    let normalizedTransaction;
-
-    try {
-      normalizedTransaction = transactionNormalizer.normalize({
-        agentId: intent.agentId,
         capabilityId: intent.capabilityId,
-        transaction: intent.transaction,
+        agentId: intent.agentId,
+        transaction,
+        decision: decision.result.allowed
+          ? decision.result
+          : { ...decision.result, decision: decision.decision },
+        capabilityExpiresAt: capability.expiresAt,
+        valueUsd: decision.valueUsd,
+        riskScore: decision.riskScore,
       });
-    } catch {
-      const result = {
-        allowed: false,
-        code: "INVALID_TRANSACTION" as const,
-        reason: "Transaction normalization failed",
-      };
 
-      auditStore.write({
+      // Reserve the spend now: an outstanding approval is authority already
+      // granted, and counting only signatures would let an agent stockpile
+      // approvals against a one-transaction budget.
+      spendStore.reserve({
+        capabilityId: approval.capabilityId,
+        agentId: approval.agentId,
+        approvalId: approval.approvalId,
+        amountUsd: decision.valueUsd,
+        valueWei: transaction.transaction.value,
+      });
+
+      auditStore.append({
+        eventType:
+          approval.status === "PENDING_HUMAN"
+            ? "HUMAN_APPROVAL_REQUESTED"
+            : "APPROVAL_CREATED",
         requestId,
-        intent,
-        result,
+        capabilityId: approval.capabilityId,
+        agentId: approval.agentId,
+        approvalId: approval.approvalId,
+        transactionId: approval.transactionId,
+        decision: decision.decision,
+        code: approval.policyCode,
+        reason: approval.reason,
+        payload: {
+          transactionHash: approval.transactionHash,
+          expiresAt: approval.expiresAt,
+          riskScore: approval.riskScore,
+          valueUsd: approval.valueUsd,
+        },
       });
 
-      return reply.code(400).send({
+      eventBus.publish(
+        approval.status === "PENDING_HUMAN"
+          ? "approval.pending_human"
+          : "approval.created",
+        {
+          requestId,
+          approvalId: approval.approvalId,
+          status: approval.status,
+          riskScore: approval.riskScore,
+          valueUsd: approval.valueUsd,
+          to: transaction.transaction.to ?? null,
+          reason: approval.reason,
+        },
+      );
+
+      return finish(approval.status === "PENDING_HUMAN" ? 202 : 201, {
         requestId,
-        ...result,
+        status: approval.status,
+        decision: decision.decision,
+        approval,
+        findings: decision.findings,
+        riskScore: decision.riskScore,
+        riskSignals: decision.riskSignals,
+        valueUsd: decision.valueUsd,
+        declaredValueUsd: decision.declaredValueUsd,
+        decodedCall: decision.decodedCall ?? null,
       });
-    }
+    },
+  );
 
-    if (normalizedTransaction.transaction.chainId !== intent.chainId) {
-      const result = {
-        allowed: false,
-        code: "TRANSACTION_NOT_ALLOWED" as const,
-        reason: "Transaction chain does not match intent chain",
-      };
+  app.get("/approvals", async (request) => {
+    const query = request.query as { status?: string; limit?: string };
+    const limit = Math.min(Number(query.limit ?? 100) || 100, 500);
 
-      auditStore.write({
-        requestId,
-        intent,
-        result,
-      });
-
-      return reply.code(403).send({
-        requestId,
-        ...result,
-      });
-    }
-
-    const firewallDecision = transactionFirewall.process(
-      normalizedTransaction,
-      policyResult,
-    );
-
-    if (!firewallDecision.allowed) {
-      return reply.code(403).send({
-        requestId,
-        ...firewallDecision.result,
-      });
-    }
-
-    replayStore.markProcessed(
-      intent.capabilityId,
-      intent.agentId,
-      intent.nonce,
-    );
-
-    if (capability.usage === "SINGLE_USE") {
-      capabilityStore.consume(capability.capabilityId);
-    }
-
-    return reply.code(200).send({
-      requestId,
-      status: "READY_FOR_SIGNING",
-      transactionId: normalizedTransaction.transactionId,
-      policy: policyResult,
-      transaction: normalizedTransaction.transaction,
-    });
+    return {
+      approvals: query.status
+        ? approvalStore.listByStatus(
+            query.status as Parameters<typeof approvalStore.listByStatus>[0],
+            limit,
+          )
+        : approvalStore.list(limit),
+      authorizationKey: approvalService.authorizationKeyInfo(),
+    };
   });
 
-  app.post("/sign", async (request, reply) => {
-    const requestId = randomUUID();
-    const body = request.body as {
-      approvalId?: unknown;
-      transaction?: unknown;
-    };
+  app.get<{ Params: { approvalId: string } }>(
+    "/approvals/:approvalId",
+    async (request, reply) => {
+      const approval = approvalStore.get(request.params.approvalId);
 
-    if (typeof body.approvalId !== "string" || !body.approvalId) {
-      return reply.code(400).send({
-        requestId,
-        allowed: false,
-        code: "INVALID_APPROVAL",
-        reason: "approvalId is required",
+      if (!approval) {
+        return reply.code(404).send({
+          allowed: false,
+          code: "APPROVAL_NOT_FOUND",
+          reason: "Approval does not exist",
+        });
+      }
+
+      return { approval, trail: auditStore.byRequest(approval.requestId) };
+    },
+  );
+
+  /**
+   * Resolving an escalation is a control-plane action.
+   *
+   * If an agent could approve its own escalation, escalation would be
+   * decoration. The admin credential is what makes the human gate real.
+   */
+  app.post<{ Params: { approvalId: string } }>(
+    "/approvals/:approvalId/approve",
+    { preHandler: auth.requireAdmin() },
+    async (request, reply) => {
+      const body = (request.body ?? {}) as { decidedBy?: string };
+
+      const approval = humanApprovalQueue.approve(
+        request.params.approvalId,
+        body.decidedBy ?? "operator",
+      );
+
+      eventBus.publish("approval.human_granted", {
+        approvalId: approval.approvalId,
+        decidedBy: approval.decidedBy ?? "operator",
       });
-    }
 
-    const approval = approvalStore.get(body.approvalId);
+      return { approval, status: approval.status };
+    },
+  );
 
-    if (!approval) {
-      return reply.code(404).send({
-        requestId,
-        allowed: false,
-        code: "APPROVAL_NOT_FOUND",
-        reason: "Approval does not exist",
+  app.post<{ Params: { approvalId: string } }>(
+    "/approvals/:approvalId/reject",
+    { preHandler: auth.requireAdmin() },
+    async (request, reply) => {
+      const body = (request.body ?? {}) as {
+        decidedBy?: string;
+        reason?: string;
+      };
+
+      // The queue releases the spend reservation itself, so a rejection does
+      // not consume the agent's budget.
+      const approval = humanApprovalQueue.reject(
+        request.params.approvalId,
+        body.decidedBy ?? "operator",
+        body.reason ?? "rejected by operator",
+      );
+
+      eventBus.publish("approval.human_denied", {
+        approvalId: approval.approvalId,
+        decidedBy: approval.decidedBy ?? "operator",
+        reason: body.reason,
       });
-    }
 
-    const transactionValidation = transactionNormalizer.normalize({
-      agentId: approval.agentId,
-      capabilityId: approval.capabilityId,
-      transaction: body.transaction,
-    });
+      return { approval, status: approval.status };
+    },
+  );
 
-    const verification = approvalService.verifyApproval({
-      approval,
-      transaction: transactionValidation,
-    });
+  // ── Signing ───────────────────────────────────────────────────────────────
+  app.post(
+    "/sign",
+    { preHandler: auth.requireAgent({ bindBodyAgentId: false }) },
+    async (request, reply) => {
+      const requestId = randomUUID();
+      const body = (request.body ?? {}) as {
+        approvalId?: unknown;
+        transaction?: unknown;
+      };
 
-    if (!verification.valid) {
-      return reply.code(403).send({
-        requestId,
-        allowed: false,
-        code: "APPROVAL_INVALID",
-        reason: verification.reason,
+      if (typeof body.approvalId !== "string" || !body.approvalId) {
+        return reply.code(400).send({
+          requestId,
+          allowed: false,
+          code: "APPROVAL_INVALID",
+          reason: "approvalId is required",
+        });
+      }
+
+      const approval = approvalStore.get(body.approvalId);
+
+      if (!approval) {
+        return reply.code(404).send({
+          requestId,
+          allowed: false,
+          code: "APPROVAL_NOT_FOUND",
+          reason: "Approval does not exist",
+        });
+      }
+
+      // Re-normalize the transaction the caller is presenting *now*. The
+      // approval is bound to a hash, so a mutated transaction cannot match.
+      let transaction;
+
+      try {
+        transaction = normalizer.normalize({
+          agentId: approval.agentId,
+          capabilityId: approval.capabilityId,
+          transaction: body.transaction,
+        });
+      } catch (error) {
+        const arx = isArxError(error)
+          ? error
+          : new ArxError("INVALID_TRANSACTION", "Transaction is not valid");
+
+        return reply.code(arx.status).send({ requestId, ...arx.toJSON() });
+      }
+
+      const verification = approvalService.verifyApproval({
+        approval,
+        transaction,
       });
-    }
 
-    try {
-      const signerResult = await signerService.sign(transactionValidation);
+      if (!verification.valid) {
+        auditStore.append({
+          eventType: "SIGNING_FAILED",
+          requestId,
+          approvalId: approval.approvalId,
+          agentId: approval.agentId,
+          capabilityId: approval.capabilityId,
+          transactionId: transaction.transactionId,
+          decision: "DENY",
+          code: verification.code,
+          reason: verification.reason,
+        });
 
-      const consumed = approvalStore.consume(approval.approvalId);
+        eventBus.publish("signing.refused", {
+          requestId,
+          approvalId: approval.approvalId,
+          code: verification.code,
+          reason: verification.reason,
+        });
 
-      if (!consumed) {
+        return reply.code(httpStatusForCode(verification.code)).send({
+          requestId,
+          allowed: false,
+          code: verification.code,
+          reason: verification.reason,
+        });
+      }
+
+      // The capability may have been revoked after the approval was issued.
+      const capability = capabilityStore.get(approval.capabilityId);
+
+      if (!capability || capability.status !== "ACTIVE") {
+        const code = capability ? "CAPABILITY_REVOKED" : "CAPABILITY_NOT_FOUND";
+
+        auditStore.append({
+          eventType: "SIGNING_FAILED",
+          requestId,
+          approvalId: approval.approvalId,
+          decision: "DENY",
+          code,
+          reason: "Capability is no longer active",
+        });
+
+        return reply.code(403).send({
+          requestId,
+          allowed: false,
+          code,
+          reason:
+            "The granting capability is no longer active, so this approval can no longer be used",
+        });
+      }
+
+      /*
+       * Claim the approval atomically BEFORE the signer is touched.
+       *
+       * This is the fix for the double-sign race. `claimForSigning` is a
+       * compare-and-swap from APPROVED to SIGNING, so of two concurrent
+       * requests exactly one proceeds. Signing first and consuming afterwards —
+       * as the previous implementation did — leaves a window in which both
+       * callers obtain a signature.
+       */
+      if (!approvalService.claimForSigning(approval.approvalId)) {
         return reply.code(409).send({
           requestId,
           allowed: false,
           code: "APPROVAL_ALREADY_CONSUMED",
-          reason: "Approval could not be consumed",
+          reason:
+            "This approval was claimed for signing by another request. An approval authorizes exactly one signature.",
         });
       }
 
-      return reply.code(200).send({
+      auditStore.append({
+        eventType: "SIGNING_STARTED",
         requestId,
-        status: "SIGNED",
         approvalId: approval.approvalId,
-        signer: {
-          adapter: signerAdapter.name,
-          address: signerResult.signerAddress,
-        },
-        transactionId: signerResult.transactionId,
-        signedTransaction: signerResult.signedTransaction,
+        agentId: approval.agentId,
+        capabilityId: approval.capabilityId,
+        transactionId: transaction.transactionId,
+        reason: `signer=${env.signerMode}`,
       });
-    } catch (error) {
-      request.log.error(error);
 
-      return reply.code(500).send({
+      eventBus.publish("signing.started", {
         requestId,
-        allowed: false,
-        code: "SIGNING_FAILED",
-        reason:
-          error instanceof Error ? error.message : "Signer adapter failed",
+        approvalId: approval.approvalId,
+        signerMode: env.signerMode,
       });
-    }
+
+      try {
+        const signerResult = await signerService.sign(transaction);
+
+        approvalService.markSigned(approval.approvalId);
+        spendStore.settle(approval.approvalId);
+
+        auditStore.append({
+          eventType: "SIGNING_SUCCEEDED",
+          requestId,
+          approvalId: approval.approvalId,
+          agentId: approval.agentId,
+          capabilityId: approval.capabilityId,
+          transactionId: transaction.transactionId,
+          decision: "ALLOW",
+          code: "POLICY_APPROVED",
+          reason: `signatureType=${signerResult.signatureType} verified=${signerResult.verified}`,
+          payload: {
+            signerAddress: signerResult.signerAddress,
+            signatureType: signerResult.signatureType,
+            verified: signerResult.verified,
+            deviceScreens: signerResult.deviceScreens ?? null,
+          },
+        });
+
+        eventBus.publish("signing.succeeded", {
+          requestId,
+          approvalId: approval.approvalId,
+          signatureType: signerResult.signatureType,
+          verified: signerResult.verified,
+          signerAddress: signerResult.signerAddress,
+          deviceScreens: signerResult.deviceScreens ?? null,
+        });
+
+        return reply.code(200).send({
+          requestId,
+          status: "SIGNED",
+          approvalId: approval.approvalId,
+          signer: {
+            adapter: signerResult.adapter,
+            mode: env.signerMode,
+            address: signerResult.signerAddress,
+            derivationPath: signerResult.derivationPath,
+          },
+          transactionId: signerResult.transactionId,
+          signedTransaction: signerResult.signedTransaction,
+          signatureType: signerResult.signatureType,
+          /** True only when the signature was cryptographically recovered to the device address. */
+          signatureVerified: signerResult.verified,
+          signature:
+            signerResult.signatureType === "REAL"
+              ? { r: signerResult.r, s: signerResult.s, v: signerResult.v, yParity: signerResult.yParity }
+              : undefined,
+          deviceScreens: signerResult.deviceScreens,
+          warning:
+            signerResult.signatureType === "MOCK"
+              ? "MOCK signature. Not a valid blockchain signature; do not broadcast."
+              : undefined,
+        });
+      } catch (error) {
+        // Terminal: a failed attempt is never retryable with the same approval.
+        approvalService.markSigningFailed(approval.approvalId);
+        spendStore.release(approval.approvalId);
+
+        const arx = isArxError(error)
+          ? error
+          : new ArxError(
+              "SIGNING_FAILED",
+              error instanceof Error ? error.message : "Signer adapter failed",
+            );
+
+        auditStore.append({
+          eventType: "SIGNING_FAILED",
+          requestId,
+          approvalId: approval.approvalId,
+          agentId: approval.agentId,
+          capabilityId: approval.capabilityId,
+          transactionId: transaction.transactionId,
+          decision: "DENY",
+          code: arx.code,
+          reason: arx.message,
+        });
+
+        eventBus.publish("signing.failed", {
+          requestId,
+          approvalId: approval.approvalId,
+          code: arx.code,
+          reason: arx.message,
+        });
+
+        return reply.code(arx.status).send({ requestId, ...arx.toJSON() });
+      }
+    },
+  );
+
+  // ── Audit ─────────────────────────────────────────────────────────────────
+  app.get("/audit", async (request) => {
+    const query = request.query as { limit?: string };
+    const limit = Math.min(Number(query.limit ?? 100) || 100, 1000);
+
+    return { head: auditStore.head(), entries: auditStore.list(limit) };
   });
 
-  app.get<{
-    Params: {
-      approvalId: string;
-    };
-  }>("/approvals/:approvalId", async (request, reply) => {
-    const approval = approvalStore.get(request.params.approvalId);
-
-    if (!approval) {
-      return reply.code(404).send({
-        error: "APPROVAL_NOT_FOUND",
-      });
-    }
+  app.get("/audit/verify", async () => {
+    const result = auditStore.verifyChain();
 
     return {
-      approval,
+      ...result,
+      explanation: result.valid
+        ? "Every entry's hash recomputes and links to its predecessor. No decision has been altered or removed."
+        : "The chain is broken: a historical entry was altered, removed, or inserted.",
     };
   });
 
-  app.post("/approvals", async (request, reply) => {
-    const requestId = randomUUID();
-    const validation = validateIntent(request.body);
+  app.get<{ Params: { requestId: string } }>(
+    "/audit/:requestId",
+    async (request) => ({
+      requestId: request.params.requestId,
+      trail: auditStore.byRequest(request.params.requestId),
+    }),
+  );
 
-    if (!validation.success) {
-      return reply.code(400).send({
-        requestId,
-        allowed: false,
-        code: "INVALID_INTENT",
-        reason: "Intent validation failed",
-        details: validation.error.flatten(),
+  // ── Broker (control plane) ────────────────────────────────────────────────
+  app.get("/broker/status", async () => broker.status());
+
+  app.post(
+    "/broker/secrets",
+    { preHandler: auth.requireAdmin() },
+    async (request, reply) => {
+      const body = (request.body ?? {}) as { name?: string; secret?: string };
+
+      if (!body.name || !body.secret) {
+        return reply.code(400).send({
+          allowed: false,
+          code: "INVALID_INTENT",
+          reason: "name and secret are required",
+        });
+      }
+
+      const sealed = await sealedSecrets.seal({
+        name: body.name,
+        secret: body.secret,
       });
-    }
 
-    const intent = validation.data;
-
-    if (!intent.transaction) {
-      return reply.code(400).send({
-        requestId,
-        allowed: false,
-        code: "INVALID_TRANSACTION",
-        reason: "A transaction is required",
+      // The response deliberately omits the ciphertext as well as the secret.
+      return reply.code(201).send({
+        name: sealed.name,
+        backend: sealed.backend,
+        hardwareRooted: sealed.backend === "ledger-keyring",
+        keyName: sealed.keyName,
+        createdAt: sealed.createdAt,
       });
-    }
+    },
+  );
 
-    const capability = capabilityStore.get(intent.capabilityId);
+  app.post(
+    "/broker/tokens",
+    { preHandler: auth.requireAdmin() },
+    async (request, reply) => {
+      const body = (request.body ?? {}) as {
+        capabilityId?: string;
+        grants?: string[];
+        ttlSeconds?: number;
+      };
 
-    if (!capability) {
-      return reply.code(403).send({
-        requestId,
-        allowed: false,
-        code: "CAPABILITY_NOT_FOUND",
-        reason: "Capability does not exist",
+      const capability = body.capabilityId
+        ? capabilityStore.get(body.capabilityId)
+        : null;
+
+      if (!capability) {
+        return reply.code(404).send({
+          allowed: false,
+          code: "CAPABILITY_NOT_FOUND",
+          reason: "Capability does not exist",
+        });
+      }
+
+      const issued = broker.issue({
+        capability,
+        grants: body.grants ?? [],
+        ttlSeconds: body.ttlSeconds,
       });
-    }
 
-    const isReplay = replayStore.hasBeenProcessed(
-      intent.capabilityId,
-      intent.agentId,
-      intent.nonce,
-    );
+      return reply.code(201).send(issued);
+    },
+  );
 
-    const policyResult = policyEngine.evaluate(capability, intent, isReplay);
+  // ── Agents (control plane) ────────────────────────────────────────────────
+  app.post(
+    "/agents",
+    { preHandler: auth.requireAdmin() },
+    async (request, reply) => {
+      const body = (request.body ?? {}) as { agentId?: string; label?: string };
 
-    auditStore.write({
-      requestId,
-      intent,
-      result: policyResult,
-    });
+      if (!body.agentId) {
+        return reply.code(400).send({
+          allowed: false,
+          code: "INVALID_INTENT",
+          reason: "agentId is required",
+        });
+      }
 
-    if (!policyResult.allowed) {
-      return reply.code(403).send({
-        requestId,
-        ...policyResult,
-      });
-    }
+      // The secret is returned exactly once and cannot be recovered later.
+      return reply
+        .code(201)
+        .send(agentStore.register({ agentId: body.agentId, label: body.label }));
+    },
+  );
 
-    let normalizedTransaction;
+  app.get("/agents", async () => ({ agents: agentStore.list() }));
 
-    try {
-      normalizedTransaction = transactionNormalizer.normalize({
-        agentId: intent.agentId,
-        capabilityId: intent.capabilityId,
-        transaction: intent.transaction,
-      });
-    } catch {
-      return reply.code(400).send({
-        requestId,
-        allowed: false,
-        code: "INVALID_TRANSACTION",
-        reason: "Transaction normalization failed",
-      });
-    }
-
-    if (normalizedTransaction.transaction.chainId !== intent.chainId) {
-      return reply.code(403).send({
-        requestId,
-        allowed: false,
-        code: "TRANSACTION_NOT_ALLOWED",
-        reason: "Transaction chain does not match intent chain",
-      });
-    }
-
-    const firewallDecision = transactionFirewall.process(
-      normalizedTransaction,
-      policyResult,
-    );
-
-    if (!firewallDecision.allowed || !firewallDecision.transaction) {
-      return reply.code(403).send({
-        requestId,
-        ...firewallDecision.result,
-      });
-    }
-
-    const now = Math.floor(Date.now() / 1000);
-
-    const approval = approvalService.createApproval({
-      requestId,
-      capabilityId: intent.capabilityId,
-      agentId: intent.agentId,
-      transaction: firewallDecision.transaction,
-      expiresAt: Math.min(capability.expiresAt, now + 300),
-    });
-
-    replayStore.markProcessed(
-      intent.capabilityId,
-      intent.agentId,
-      intent.nonce,
-    );
-
-    if (capability.usage === "SINGLE_USE") {
-      capabilityStore.consume(capability.capabilityId);
-    }
-
-    return reply.code(201).send({
-      requestId,
-      status: "APPROVED",
-      approval,
-    });
-  });
+  // Sweeping expired approvals is a background concern, not a request concern.
+  if (env.nodeEnv !== "test") {
+    expirySweeper.start();
+    app.addHook("onClose", async () => expirySweeper.stop());
+  }
 
   return app;
 }
+
+export type ArxServer = Awaited<ReturnType<typeof buildServer>>;
