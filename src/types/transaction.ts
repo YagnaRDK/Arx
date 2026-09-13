@@ -1,8 +1,18 @@
 import { z } from "zod";
 
+export const HexAddressSchema = z
+  .string()
+  .regex(/^0x[a-fA-F0-9]{40}$/, "Invalid EVM address");
+
 export const EvmTransactionSchema = z.object({
   chainId: z.number().int().positive(),
-  to: z.string().regex(/^0x[a-fA-F0-9]{40}$/, "Invalid EVM address"),
+
+  /**
+   * Absent `to` means contract creation, which is a separate authority gated by
+   * `capability.allowContractCreation`.
+   */
+  to: HexAddressSchema.optional(),
+
   value: z.string().regex(/^\d+$/, "Value must be an integer string"),
   data: z
     .string()
@@ -15,11 +25,15 @@ export const EvmTransactionSchema = z.object({
     .string()
     .regex(/^\d+$/, "Max priority fee per gas must be an integer string"),
   nonce: z.number().int().nonnegative(),
+
+  /** EIP-1559 is the default; legacy is supported for chains that need it. */
+  type: z.enum(["eip1559", "legacy"]).default("eip1559"),
 });
 
 export type EvmTransaction = z.infer<typeof EvmTransactionSchema>;
 
 export const NormalizedTransactionSchema = z.object({
+  /** Deterministic SHA-256 identity. Never a random UUID. */
   transactionId: z.string().min(1),
   agentId: z.string().min(1),
   capabilityId: z.string().min(1),
