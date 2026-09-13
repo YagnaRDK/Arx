@@ -1,0 +1,19 @@
+{
+  "// note": "Hides generated and ignored directories from the Explorer. These are all gitignored already; this only stops them cluttering the tree.",
+  "files.exclude": {
+    "**/node_modules": true,
+    "**/.test-data": true,
+    "**/_rt": true,
+    "**/*.sqlite-shm": true,
+    "**/*.sqlite-wal": true
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/.test-data": true,
+    "**/bun.lock": true
+  },
+  "files.watcherExclude": {
+    "**/node_modules/**": true,
+    "**/.test-data/**": true
+  }
+}

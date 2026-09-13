@@ -111,6 +111,30 @@ export class ApprovalStore {
     WHERE expires_at <= ? AND status IN ('APPROVED', 'PENDING_HUMAN')
   `);
 
+  /**
+   * Reclaims approvals abandoned mid-signature.
+   *
+   * `claimForSigning` moves APPROVED -> SIGNING before the signer is called. If
+   * the process dies, or the signer hangs past its own timeout, the row stays
+   * SIGNING forever: the expiry sweep only touches APPROVED and PENDING_HUMAN,
+   * so its spend reservation is never released and that budget is consumed
+   * against the rolling window permanently.
+   *
+   * This is fail-closed — a SIGNING approval can never be redeemed, because
+   * `verifyApproval` rejects every non-APPROVED status — so it costs
+   * availability rather than safety. It is still wrong: an agent that crashes
+   * once should not lose a slice of its daily allowance for good.
+   *
+   * The grace period is deliberately separate from the approval's own expiry. A
+   * signing attempt still in flight minutes later has effectively failed,
+   * whatever the approval's remaining lifetime says.
+   */
+  private readonly reclaimSigningStatement = db.prepare(`
+    UPDATE approvals
+    SET status = 'SIGNING_FAILED'
+    WHERE status = 'SIGNING' AND created_at <= ?
+  `);
+
   create(approval: Approval): Approval {
     this.insertStatement.run(
       approval.approvalId,
@@ -199,5 +223,30 @@ export class ApprovalStore {
   /** Sweeps approvals whose deadline has passed. Returns how many were expired. */
   expireOverdue(now = Math.floor(Date.now() / 1000)): number {
     return this.expireStatement.run(now).changes;
+  }
+
+  /**
+   * Moves SIGNING approvals older than `graceSeconds` to the terminal
+   * SIGNING_FAILED, so their spend reservations can be released.
+   *
+   * Terminal rather than back to APPROVED: a signature may in fact have
+   * reached the device, and returning the approval to a usable state could
+   * authorize a second one.
+   */
+  reclaimStuckSigning(
+    graceSeconds: number,
+    now = Math.floor(Date.now() / 1000),
+  ): number {
+    return this.reclaimSigningStatement.run(now - graceSeconds).changes;
+  }
+
+  /** SIGNING approvals older than the grace period, for the sweeper to report. */
+  listStuckSigning(
+    graceSeconds: number,
+    now = Math.floor(Date.now() / 1000),
+  ): Approval[] {
+    return this.listByStatus("SIGNING", 1000).filter(
+      (approval) => approval.createdAt <= now - graceSeconds,
+    );
   }
 }

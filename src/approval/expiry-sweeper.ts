@@ -19,6 +19,8 @@ export type SweepResult = {
   expired: number;
   /** Spend reservations released as a result. */
   released: number;
+  /** Abandoned signing attempts reclaimed to SIGNING_FAILED. */
+  reclaimed?: number;
   at: number;
 };
 
@@ -30,6 +32,11 @@ export type ExpirySweeperDependencies = {
   intervalMs?: number;
   /** Injected for tests; production reads the wall clock each sweep. */
   clock?: () => number;
+  /**
+   * How long a signing attempt may stay in flight before it is treated as
+   * abandoned. Generous, because a human confirming on a device is slow.
+   */
+  stuckSigningGraceSeconds?: number;
 };
 
 export class ApprovalExpirySweeper {
@@ -39,6 +46,8 @@ export class ApprovalExpirySweeper {
   private readonly intervalMs: number;
   private readonly clock: () => number;
 
+  private readonly stuckSigningGraceSeconds: number;
+
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(dependencies: ExpirySweeperDependencies) {
@@ -47,6 +56,8 @@ export class ApprovalExpirySweeper {
     this.auditStore = dependencies.auditStore;
     this.intervalMs = dependencies.intervalMs ?? 30_000;
     this.clock = dependencies.clock ?? (() => Math.floor(Date.now() / 1000));
+    this.stuckSigningGraceSeconds =
+      dependencies.stuckSigningGraceSeconds ?? 600;
   }
 
   get running(): boolean {
@@ -97,9 +108,52 @@ export class ApprovalExpirySweeper {
       ...this.approvalStore.listByStatus("PENDING_HUMAN", 1000),
     ].filter((approval) => approval.expiresAt <= now);
 
+    /*
+     * Abandoned signing attempts, reclaimed before the expiry pass.
+     *
+     * These are collected first so their reservations can be released below by
+     * the same loop: once reclaimed they are SIGNING_FAILED, which is terminal,
+     * so there is no race with a request about to redeem them.
+     */
+    const stuck = this.approvalStore.listStuckSigning(
+      this.stuckSigningGraceSeconds,
+      now,
+    );
+
+    const reclaimed = this.approvalStore.reclaimStuckSigning(
+      this.stuckSigningGraceSeconds,
+      now,
+    );
+
     const expired = this.approvalStore.expireOverdue(now);
 
     let released = 0;
+
+    for (const abandoned of stuck) {
+      if (this.spendStore.release(abandoned.approvalId, now)) {
+        released += 1;
+      }
+
+      this.auditStore?.append({
+        eventType: "SIGNING_FAILED",
+        requestId: abandoned.requestId,
+        capabilityId: abandoned.capabilityId,
+        agentId: abandoned.agentId,
+        approvalId: abandoned.approvalId,
+        transactionId: abandoned.transactionId,
+        decision: "DENY",
+        code: "SIGNING_FAILED",
+        reason: `Signing attempt abandoned: still in flight ${now - abandoned.createdAt}s after the approval was issued, past the ${this.stuckSigningGraceSeconds}s grace period`,
+        payload: {
+          previousStatus: "SIGNING",
+          spendReleased: true,
+          // Terminal, not returned to APPROVED: a signature may have reached
+          // the device, so the approval must never become usable again.
+          reclaimedTo: "SIGNING_FAILED",
+        },
+        timestamp: now,
+      });
+    }
 
     for (const candidate of candidates) {
       const current = this.approvalStore.get(candidate.approvalId);
@@ -131,6 +185,6 @@ export class ApprovalExpirySweeper {
       });
     }
 
-    return { expired, released, at: now };
+    return { expired, released, reclaimed, at: now };
   }
 }
