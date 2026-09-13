@@ -80,17 +80,78 @@ export function intentDetail(
   return rows;
 }
 
+/**
+ * Calibrates the demo's ETH reference price against the server's oracle.
+ *
+ * The suite has no oracle of its own and there is no price endpoint to ask, so
+ * it starts from a printed assumption. But every decision response carries the
+ * oracle's own `valueUsd` for a transaction whose wei amount the suite chose —
+ * which is enough to recover the price the server is actually using. Doing so
+ * keeps the USD figures in the transcript honest; it never changes a verdict,
+ * because the capabilities whose scenarios are not about value binding carry a
+ * deliberately wide tolerance.
+ */
+function calibratePrice(
+  ctx: RunContext,
+  trace: Trace,
+  intent: Intent,
+  result: ApiResult,
+): void {
+  const body = result.body as Record<string, unknown> | null;
+  const valueUsd = typeof body?.valueUsd === "number" ? body.valueUsd : null;
+  const valueWei = intent.transaction?.value;
+
+  if (valueUsd === null || valueUsd <= 0 || !valueWei || valueWei === "0") {
+    return;
+  }
+
+  let eth: number;
+
+  try {
+    eth = Number(BigInt(valueWei) / 10n ** 12n) / 1e6;
+  } catch {
+    return;
+  }
+
+  if (!(eth > 0)) {
+    return;
+  }
+
+  const observed = valueUsd / eth;
+
+  if (!Number.isFinite(observed) || observed <= 0) {
+    return;
+  }
+
+  if (Math.abs(observed - ctx.ethUsd) / ctx.ethUsd < 0.01) {
+    return;
+  }
+
+  const previous = ctx.ethUsd;
+
+  ctx.ethUsd = observed;
+  ctx.ethUsdSource = "calibrated from the server's oracle valueUsd";
+
+  trace.note(
+    `ETH reference price corrected from ${formatUsd(previous)} to ${formatUsd(observed)}, derived from the server's own oracle value`,
+  );
+}
+
 export async function requestApproval(
   ctx: RunContext,
   trace: Trace,
   intent: Intent,
   label = "POST /approvals",
 ): Promise<ApiResult> {
-  return trace.requireRoute(
+  const result = trace.requireRoute(
     await trace.call(label, intentDetail(ctx, intent), () =>
       ctx.client.post("/approvals", intent),
     ),
   );
+
+  calibratePrice(ctx, trace, intent, result);
+
+  return result;
 }
 
 export async function requestSignature(

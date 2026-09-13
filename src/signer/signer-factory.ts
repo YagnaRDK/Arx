@@ -1,6 +1,7 @@
 import { env, type SignerMode } from "../config/env";
 import { DmkSignerAdapter } from "./dmk-signer";
 import { MockSignerAdapter } from "./mock-signer";
+import { SimSignerAdapter } from "./sim-signer";
 import { PrivySignerAdapter } from "./privy-signer";
 import { SignerService } from "./signer-service";
 import type { SignerAdapter } from "./signer-types";
@@ -21,6 +22,11 @@ export function createSignerAdapter(
   switch (mode) {
     case "mock":
       return new MockSignerAdapter();
+
+    case "sim":
+      return new SimSignerAdapter({
+        derivationPath: env.signerDerivationPath,
+      });
 
     case "speculos":
       return new SpeculosSignerAdapter({

@@ -528,7 +528,9 @@ async function main(): Promise<number> {
           databasePath: server.databasePath,
         },
         signer: signerInfo.body,
-        ethUsd: { value: price.price, source: price.source },
+        // Reported post-run so the figure matches the transcript: the context
+        // recalibrates against the server's oracle on the first priced decision.
+        ethUsd: { value: ctx.ethUsd, source: ctx.ethUsdSource },
         runTag: options.tag,
         seeds: seedOutcomes,
         scenarios: outcomes,

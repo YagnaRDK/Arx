@@ -34,7 +34,7 @@ function readBoolean(name: string, fallback: boolean): boolean {
   return raw === "1" || raw.toLowerCase() === "true";
 }
 
-const SIGNER_MODES = ["mock", "speculos", "dmk", "privy"] as const;
+const SIGNER_MODES = ["mock", "sim", "speculos", "dmk", "privy"] as const;
 export type SignerMode = (typeof SIGNER_MODES)[number];
 
 function readSignerMode(): SignerMode {
@@ -56,6 +56,9 @@ export const env = {
 
   /**
    * `mock` is the default so a clean clone runs the full demo with no hardware.
+   * `sim` produces a real secp256k1 signature over the real RLP through the
+   * real APDU codec, keyed from the published Speculos test mnemonic — the
+   * device is simulated, the cryptography is not.
    * The mode is reported on every signing response and on `/signer` so a mock
    * result can never be mistaken for a device-backed one.
    */

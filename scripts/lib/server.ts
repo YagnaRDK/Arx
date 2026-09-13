@@ -69,10 +69,15 @@ export async function attachOrStart(options: {
     return {
       baseUrl: options.baseUrl,
       spawned: false,
+      // Needed only by the audit-tamper scenario, which has to reach the file
+      // out of band. `/health` does not currently report it, so fall back to
+      // the env var and then to the same default `src/config/env.ts` uses. If
+      // the guess is wrong the tamper lands on a different database and the
+      // scenario fails loudly rather than passing on a file nobody verified.
       databasePath:
         (await reportedDatabasePath(options.baseUrl)) ??
         process.env.DATABASE_PATH ??
-        null,
+        "./data/arx.sqlite",
       async stop() {},
       logs: () => "",
     };

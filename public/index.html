@@ -497,6 +497,27 @@
     overflow-wrap: anywhere;
   }
 
+  /* At phone width the fixed columns would leave the reason a few characters
+   * wide, so the stage name moves above its detail instead. */
+  @media (max-width: 520px) {
+    .stage {
+      grid-template-columns: 22px 1fr;
+      row-gap: 4px;
+    }
+
+    .stage .detail {
+      grid-column: 2;
+    }
+
+    .feed-item {
+      grid-template-columns: 72px 1fr;
+    }
+
+    .integrations {
+      grid-template-columns: 1fr !important;
+    }
+  }
+
   .stage .detail .c {
     font-family: var(--mono);
     font-weight: 700;
@@ -1121,7 +1142,17 @@
 
       const existing = byRequest.get(requestId);
 
-      if (!existing || (entry.seq || 0) > (existing.seq || 0)) {
+      // Prefer the newest entry that carries a decision code. Several stages
+      // append informational entries (a risk score, a capability resolution)
+      // with no code, and letting one of those win would show the request's
+      // outcome as unknown when the server was perfectly clear about it.
+      const better =
+        !existing ||
+        (entry.code && !existing.code) ||
+        (Boolean(entry.code) === Boolean(existing.code) &&
+          (entry.seq || 0) > (existing.seq || 0));
+
+      if (better) {
         byRequest.set(requestId, entry);
       }
     }
@@ -1855,8 +1886,10 @@
       </div>
       <div class="meter ${klass}"><i style="width:${Math.round(ratio * 100)}%"></i></div>
       ${
-        signals.length === 0
-          ? `<div class="missing" style="margin-top:12px">Score reported with no contributing signals. A score without signals is not auditable — the API should return every signal with its weight and explanation.</div>`
+        signals.length === 0 && (score ?? 0) > 0
+          ? `<div class="missing" style="margin-top:12px">Non-zero score reported with no contributing signals. A score nobody can explain is not auditable — the API should return every signal with its weight and explanation.</div>`
+          : signals.length === 0
+            ? `<div class="empty" style="margin-top:12px">Nothing flagged. No risk signal contributed to this decision.</div>`
           : `<div style="margin-top:10px">${signals
               .map(
                 (signal) => `
@@ -2300,7 +2333,8 @@
       </div>
       <div class="hint">
         To prove tamper-evidence by hand, edit a historical entry out of band and press Verify.
-        <code>sqlite3 ${html((state.health && (state.health.databasePath || state.health.database)) || "./data/arx.sqlite")} \\
+        ${state.health && (state.health.databasePath || state.health.database) ? "" : `<span class="muted">The server does not report its database path, so the default is shown.</span>`}
+        <code>sqlite3 ${html((state.health && (state.health.databasePath || state.health.database)) || "$DATABASE_PATH  # default ./data/arx.sqlite")} \\
   "UPDATE audit_chain SET reason='redacted' WHERE seq=3;"</code>
         The suite does this automatically and reverts it: <span class="mono">bun run scripts/demo.ts --only audit-tamper</span>
       </div>`;
@@ -2309,6 +2343,90 @@
   }
 
   // -- integrations
+
+  /**
+   * Adapter roster.
+   *
+   * `FIXTURES` gets its own badge and its own colour, deliberately. An adapter
+   * running on offline fixtures is answering questions, so a plain "LIVE" would
+   * be a lie and a plain "DORMANT" would be wrong too. The panel says which data
+   * a decision was actually made on, because that is the thing a reviewer needs
+   * to know and the thing a dashboard is most tempted to smooth over.
+   */
+  const STATE_STYLES = {
+    LIVE: ["t-allow", "LIVE"],
+    FIXTURES: ["t-escalate", "FIXTURES \u2014 offline data"],
+    MOCK: ["t-escalate", "MOCK \u2014 emulated"],
+    SOFTWARE: ["t-escalate", "SOFTWARE \u2014 not hardware-rooted"],
+    DORMANT: ["t-idle", "DORMANT"],
+    DEGRADED: ["t-deny", "DEGRADED"],
+    UNKNOWN: ["t-idle", "UNKNOWN"],
+  };
+
+  /**
+   * `available: true` is not the same as "working as intended".
+   *
+   * A mock signer is available and is not a device; an uninitialised key ring is
+   * available and cannot sign. So every readiness boolean the service reports has
+   * to be true before the badge reads LIVE, and an emulated or software-rooted
+   * component is labelled as such rather than being rounded up to green.
+   */
+  function stateBadge(item) {
+    const declared =
+      typeof item.state === "string" ? item.state.toUpperCase() : null;
+
+    if (declared && STATE_STYLES[declared]) {
+      const [klass, label] = STATE_STYLES[declared];
+      return `<span class="tag ${klass}">${html(label)}</span>`;
+    }
+
+    if (item.emulated === true || item.signatureType === "MOCK") {
+      const [klass, label] = STATE_STYLES.MOCK;
+      return `<span class="tag ${klass}">${html(label)}</span>`;
+    }
+
+    if (item.hardwareRooted === false) {
+      const [klass, label] = STATE_STYLES.SOFTWARE;
+      return `<span class="tag ${klass}">${html(label)}</span>`;
+    }
+
+    const flags = [item.ready, item.live, item.available, item.initialized, item.isReady].filter(
+      (flag) => typeof flag === "boolean",
+    );
+
+    const key =
+      flags.length === 0
+        ? "UNKNOWN"
+        : flags.every(Boolean)
+          ? "LIVE"
+          : "DORMANT";
+
+    const [klass, label] = STATE_STYLES[key];
+
+    return `<span class="tag ${klass}">${html(label)}</span>`;
+  }
+
+  function integrationCard(item) {
+    const name = item.name || item.id || "adapter";
+    const subtitle = [item.sponsor, item.seam || item.kind]
+      .filter(Boolean)
+      .join(" \u00b7 ");
+
+    return `
+      <div class="integration">
+        <div>
+          <div class="n">${html(name)}</div>
+          ${subtitle ? `<div class="d">${html(subtitle)}</div>` : ""}
+          ${item.detail ? `<div class="d" style="margin-top:3px">${html(item.detail)}</div>` : ""}
+          ${
+            Array.isArray(item.enabledBy) && item.enabledBy.length
+              ? `<div class="d mono" style="margin-top:4px;font-size:11px">enabled by ${html(item.enabledBy.join(", "))}</div>`
+              : ""
+          }
+        </div>
+        ${stateBadge(item)}
+      </div>`;
+  }
 
   function renderIntegrations() {
     const body = $("integrations-body");
@@ -2319,48 +2437,83 @@
     }
 
     if (!state.integrations) {
-      body.innerHTML = `<div class="empty">Waiting for adapter status…</div>`;
+      body.innerHTML =
+        state.reachable === false
+          ? `<div class="missing">API unreachable \u2014 adapter status unknown.</div>`
+          : `<div class="empty">Waiting for adapter status\u2026</div>`;
       return;
     }
 
-    const list = Array.isArray(state.integrations)
-      ? state.integrations
-      : Array.isArray(state.integrations.integrations)
-        ? state.integrations.integrations
-        : Object.entries(state.integrations).map(([name, value]) =>
-            value && typeof value === "object"
-              ? { name, ...value }
-              : { name, ready: Boolean(value) },
-          );
+    const payload = state.integrations;
 
-    if (!list.length) {
+    // The server groups core services by key and third-party adapters in an
+    // array. Older shapes (a bare array, or a flat map) are still handled.
+    const core = [];
+    const adapters = [];
+
+    if (Array.isArray(payload)) {
+      adapters.push(...payload);
+    } else if (typeof payload === "object") {
+      if (Array.isArray(payload.adapters)) {
+        adapters.push(...payload.adapters);
+      }
+
+      if (Array.isArray(payload.integrations)) {
+        adapters.push(...payload.integrations);
+      }
+
+      const CORE_LABELS = {
+        signer: "Signer boundary",
+        priceOracle: "Price oracle",
+        keyRing: "Ledger key ring",
+        sealBackend: "Seal backend",
+      };
+
+      for (const [key, value] of Object.entries(payload)) {
+        if (key === "adapters" || key === "integrations") {
+          continue;
+        }
+
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+          continue;
+        }
+
+        core.push({
+          name: CORE_LABELS[key] || key,
+          sponsor: null,
+          seam:
+            value.name || value.adapter || value.mode || value.backend || null,
+          detail: value.detail || value.reason || null,
+          state: value.state,
+          ready: value.ready,
+          available: value.available,
+          initialized: value.initialized,
+          isReady: value.isReady,
+          emulated: value.emulated,
+          signatureType: value.signatureType,
+          hardwareRooted: value.hardwareRooted,
+        });
+      }
+    }
+
+    if (core.length === 0 && adapters.length === 0) {
       body.innerHTML = `<div class="empty">No adapters registered.</div>`;
       return;
     }
 
-    body.innerHTML = `<div class="integrations" style="grid-template-columns:repeat(auto-fill,minmax(260px,1fr))">
-      ${list
-        .map((item) => {
-          const ready =
-            item.ready ?? item.live ?? item.available ?? item.isReady ?? null;
-          const tag =
-            ready === true
-              ? `<span class="tag t-allow">LIVE</span>`
-              : ready === false
-                ? `<span class="tag t-idle">DORMANT</span>`
-                : `<span class="tag t-idle">UNKNOWN</span>`;
+    const group = (title, items) =>
+      items.length === 0
+        ? ""
+        : `<div style="margin-bottom:12px">
+             <div class="muted" style="font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;margin-bottom:7px">${html(title)}</div>
+             <div class="integrations" style="grid-template-columns:repeat(auto-fill,minmax(280px,1fr))">
+               ${items.map(integrationCard).join("")}
+             </div>
+           </div>`;
 
-          return `
-            <div class="integration">
-              <div>
-                <div class="n">${html(item.name || item.id || "adapter")}</div>
-                <div class="d">${html(item.seam || item.kind || item.description || (ready === false ? "not configured" : ""))}</div>
-              </div>
-              ${tag}
-            </div>`;
-        })
-        .join("")}
-    </div>`;
+    body.innerHTML = `
+      ${group("Core services", core)}
+      ${group(`Third-party adapters (${adapters.length})`, adapters)}`;
   }
 
   // --- boot ----------------------------------------------------------
