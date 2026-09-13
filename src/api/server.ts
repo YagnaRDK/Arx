@@ -46,14 +46,18 @@ const SERVICE_VERSION = "1.0.0";
  * optional module, and a static import would make the build depend on a file
  * that is absent when no integration is configured.
  */
-async function loadIntegrationRegistry(): Promise<{
-  describe: () => Promise<unknown>;
-} | null> {
+type LoadedRegistry = {
+  describe: (options?: unknown) => Promise<unknown>;
+  ens?: unknown;
+  graph?: unknown;
+};
+
+async function loadIntegrationRegistry(): Promise<LoadedRegistry | null> {
   const specifier = "../integrations/registry";
 
   try {
     const module = (await import(specifier)) as {
-      integrationRegistry?: { describe: () => Promise<unknown> };
+      integrationRegistry?: LoadedRegistry;
     };
 
     return module.integrationRegistry ?? null;
@@ -84,9 +88,26 @@ export async function buildServer() {
   const normalizer = new TransactionNormalizer();
   const priceOracle = createPriceOracle({ mode: env.priceOracleMode });
 
+  const integrationRegistry = await loadIntegrationRegistry();
+
+  /*
+   * ENS and The Graph are wired into the firewall itself, not bolted alongside
+   * it. That is what makes them load-bearing: an allowlist entry written as an
+   * ENS name is resolved during authorization, and recipient reputation feeds
+   * the risk score that decides escalation. Both adapters report their own
+   * readiness and return "could not check" rather than a clean result when
+   * their data source is unreachable, so an outage cannot widen what is
+   * permitted.
+   */
   const firewall = new TransactionFirewall({
     priceOracle,
     spendStore,
+    ...(integrationRegistry?.ens
+      ? { nameResolver: integrationRegistry.ens as never }
+      : {}),
+    ...(integrationRegistry?.graph
+      ? { riskProviders: [integrationRegistry.graph as never] }
+      : {}),
   });
 
   const pipeline = new AuthorizationPipeline({
@@ -126,8 +147,6 @@ export async function buildServer() {
     agentAuthenticator: new AgentAuthenticator(agentStore),
     adminAuthenticator: new AdminAuthenticator(),
   });
-
-  const integrationRegistry = await loadIntegrationRegistry();
 
   /**
    * An unauthenticated control plane means anything that can reach the port can
@@ -190,6 +209,7 @@ export async function buildServer() {
       version: SERVICE_VERSION,
       policyVersion: POLICY_VERSION,
       signerMode: env.signerMode,
+      databasePath: env.databasePath,
       auditChain: chain.valid
         ? { valid: true, entries: chain.entries }
         : { valid: false, brokenAtSeq: chain.brokenAtSeq, problem: chain.problem },
@@ -211,11 +231,16 @@ export async function buildServer() {
     };
   });
 
-  app.get("/integrations", async () => {
+  app.get("/integrations", async (request) => {
     const brokerStatus = await broker.status();
+    const query = request.query as { probe?: string };
 
+    // `describe()` makes no outbound calls unless asked, so the default
+    // response is fast and offline. `?probe=1` performs the live checks.
     const adapters = integrationRegistry
-      ? await integrationRegistry.describe()
+      ? await integrationRegistry.describe(
+          query.probe === "1" ? { probe: true } : undefined,
+        )
       : [];
 
     return {
@@ -490,10 +515,25 @@ export async function buildServer() {
         );
 
         if (existing.kind === "REPLAY") {
+          /*
+           * The original decision, replayed. No second approval exists and no
+           * further authority was consumed, so a retried request — or an agent
+           * talked into submitting the same payment twice — cannot pay twice.
+           *
+           * The marker goes in the body as well as the header: a client reading
+           * only the body could otherwise not distinguish a replayed decision
+           * from a fresh authorization, and in an authorization layer that
+           * ambiguity is itself a defect.
+           */
           return reply
             .code(existing.status)
             .header("x-arx-idempotent-replay", "true")
-            .send(existing.body);
+            .send({
+              ...(existing.body as Record<string, unknown>),
+              idempotentReplay: true,
+              idempotencyNote:
+                "This is the original decision for this intentId, replayed. No new approval was created and no additional authority was consumed.",
+            });
         }
 
         if (existing.kind === "CONFLICT") {
@@ -570,6 +610,19 @@ export async function buildServer() {
         capabilityExpiresAt: capability.expiresAt,
         valueUsd: decision.valueUsd,
         riskScore: decision.riskScore,
+        // So an operator reviewing an escalation can see who is being paid,
+        // including a payee that only appears inside the calldata.
+        summary: {
+          to: transaction.transaction.to ?? null,
+          valueWei: transaction.transaction.value,
+          chainId: transaction.transaction.chainId,
+          selector:
+            transaction.transaction.data.length >= 10
+              ? transaction.transaction.data.slice(0, 10)
+              : null,
+          method: decision.decodedCall?.signature ?? null,
+          calldataRecipients: decision.decodedCall?.recipients ?? [],
+        },
       });
 
       // Reserve the spend now: an outstanding approval is authority already
@@ -633,6 +686,11 @@ export async function buildServer() {
       });
     },
   );
+
+  /** The escalation queue, which is what the human approval UI reads. */
+  app.get("/approvals/pending", async () => ({
+    approvals: humanApprovalQueue.listPending(),
+  }));
 
   app.get("/approvals", async (request) => {
     const query = request.query as { status?: string; limit?: string };
@@ -1069,6 +1127,62 @@ export async function buildServer() {
   );
 
   app.get("/agents", async () => ({ agents: agentStore.list() }));
+
+  app.post<{ Params: { agentId: string } }>(
+    "/agents/:agentId/enable",
+    { preHandler: auth.requireAdmin() },
+    async (request, reply) => {
+      if (!agentStore.setEnabled(request.params.agentId, true)) {
+        return reply.code(404).send({
+          allowed: false,
+          code: "AGENT_NOT_FOUND",
+          reason: "Agent does not exist",
+        });
+      }
+
+      return { agentId: request.params.agentId, enabled: true };
+    },
+  );
+
+  app.post<{ Params: { agentId: string } }>(
+    "/agents/:agentId/disable",
+    { preHandler: auth.requireAdmin() },
+    async (request, reply) => {
+      if (!agentStore.setEnabled(request.params.agentId, false)) {
+        return reply.code(404).send({
+          allowed: false,
+          code: "AGENT_NOT_FOUND",
+          reason: "Agent does not exist",
+        });
+      }
+
+      // Disabling revokes the agent's ability to authenticate. It does not
+      // revoke approvals already issued — those expire or are revoked
+      // individually, so a disable is not silently retroactive.
+      return { agentId: request.params.agentId, enabled: false };
+    },
+  );
+
+  /** Read-only price probe, so a viewer can see which oracle answered. */
+  app.get("/oracle/price", async (request, reply) => {
+    const query = request.query as { asset?: string; chainId?: string };
+    const asset = (query.asset ?? "ETH").toUpperCase();
+    const chainId = Number(query.chainId ?? 1) || 1;
+
+    const quote = await priceOracle.getUsdPrice(asset, chainId);
+
+    if (quote.status !== "OK") {
+      return reply.code(503).send({
+        allowed: false,
+        code: "PRICE_UNAVAILABLE",
+        reason: quote.reason,
+        asset,
+        chainId,
+      });
+    }
+
+    return { ...quote.value, chainId };
+  });
 
   // Sweeping expired approvals is a background concern, not a request concern.
   if (env.nodeEnv !== "test") {

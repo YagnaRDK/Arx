@@ -135,6 +135,8 @@ export class AuthorizationPipeline {
 
     eventBus.publish("policy.evaluated", {
       requestId,
+      agentId: intent.agentId,
+      capabilityId: intent.capabilityId,
       decision: policyResult.allowed ? "ALLOW" : (policyResult.decision ?? "DENY"),
       code: policyResult.code,
       reason: policyResult.reason,
@@ -232,6 +234,8 @@ export class AuthorizationPipeline {
 
     eventBus.publish("firewall.checked", {
       requestId,
+      agentId: intent.agentId,
+      capabilityId: intent.capabilityId,
       decision: decision.decision,
       code: decision.result.code,
       reason: decision.result.reason,
@@ -298,6 +302,8 @@ export class AuthorizationPipeline {
 
     eventBus.publish("policy.evaluated", {
       requestId,
+      agentId: intent.agentId,
+      capabilityId: intent.capabilityId,
       decision: result.decision ?? "DENY",
       code: result.code,
       reason: result.reason,

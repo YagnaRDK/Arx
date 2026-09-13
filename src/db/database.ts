@@ -119,6 +119,8 @@ addColumn("approvals", "authorization_signature TEXT");
 addColumn("approvals", "authorization_key_id TEXT");
 addColumn("approvals", "decided_by TEXT");
 addColumn("approvals", "decided_at INTEGER");
+// What the human is being asked to authorize, for the escalation queue.
+addColumn("approvals", "summary TEXT");
 
 /**
  * Tamper-evident audit chain.

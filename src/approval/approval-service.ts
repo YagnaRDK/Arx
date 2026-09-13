@@ -66,6 +66,12 @@ export type CreateApprovalInput = {
   /** Injected so the decision is deterministic and testable. */
   now?: number;
   policyVersion?: string;
+
+  /**
+   * What the human is being asked to authorize, for the escalation queue.
+   * Display evidence only — the transaction hash remains the binding.
+   */
+  summary?: Approval["summary"];
 };
 
 /** Statuses that cannot authorize a signature, and the code each one reports. */
@@ -176,6 +182,19 @@ export class ApprovalService {
       expiresAt,
       status: escalated ? "PENDING_HUMAN" : "APPROVED",
       reason: decision.reason,
+      // Falls back to the transaction's own fields so the queue is never blank,
+      // even when the caller supplies no decoded detail.
+      summary: input.summary ?? {
+        to: input.transaction.transaction.to ?? null,
+        valueWei: input.transaction.transaction.value,
+        chainId: input.transaction.transaction.chainId,
+        selector:
+          input.transaction.transaction.data.length >= 10
+            ? input.transaction.transaction.data.slice(0, 10)
+            : null,
+        method: null,
+        calldataRecipients: [],
+      },
     };
 
     const approval: Approval = {

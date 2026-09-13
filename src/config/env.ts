@@ -115,21 +115,42 @@ export const env = {
   ensChain: (process.env.ENS_CHAIN ?? "sepolia") as "sepolia" | "mainnet",
 
   graphApiKey: process.env.GRAPH_API_KEY ?? "",
+  /**
+   * The Graph's hosted Token API. `token-api.thegraph.com` no longer serves —
+   * its TLS handshake fails and the docs redirect to Pinax — so the default
+   * points at the operator that now hosts it.
+   */
   graphTokenApiUrl:
-    process.env.GRAPH_TOKEN_API_URL ?? "https://token-api.thegraph.com",
+    process.env.GRAPH_TOKEN_API_URL ?? "https://api.pinax.network",
 
   x402Enabled: readBoolean("X402_ENABLED", false),
   x402PayTo: process.env.X402_PAY_TO ?? "",
   x402Network: process.env.X402_NETWORK ?? "hedera-testnet",
   x402PriceUsdc: process.env.X402_PRICE_USDC ?? "0.01",
   x402FacilitatorUrl: process.env.X402_FACILITATOR_URL ?? "",
+  /**
+   * Serve a paid request when no facilitator can settle it.
+   *
+   * The gate refuses by default: accepting a payment it cannot verify as
+   * settled would make the paywall decorative. Enabling this is an explicit
+   * operator choice for a demo, never a fallback Arx takes on its own.
+   */
+  x402AllowUnsettledPayments: readBoolean("X402_ALLOW_UNSETTLED_PAYMENTS", false),
+  /** Local demo key for the x402 payer. Never a production posture. */
+  x402PayerPrivateKey: process.env.X402_PAYER_PRIVATE_KEY ?? "",
 
   worldAppId: process.env.WORLD_APP_ID ?? "",
   worldAction: process.env.WORLD_ACTION ?? "arx-high-risk-approval",
+  /** World documents rp_id separately from app_id; they are not always equal. */
+  worldRpId: process.env.WORLD_RP_ID ?? "",
 
   privyAppId: process.env.PRIVY_APP_ID ?? "",
   privyAppSecret: process.env.PRIVY_APP_SECRET ?? "",
   privyWalletId: process.env.PRIVY_WALLET_ID ?? "",
+
+  oneInchApiKey: process.env.ONEINCH_API_KEY ?? "",
+  oneInchAquaRouter: process.env.ONEINCH_AQUA_ROUTER ?? "",
+  oneInchAquaChainId: readNumber("ONEINCH_AQUA_CHAIN_ID", 0),
 
   dashboardEnabled: readBoolean("ARX_DASHBOARD", true),
 } as const;

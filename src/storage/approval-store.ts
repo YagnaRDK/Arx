@@ -27,6 +27,7 @@ type ApprovalRow = {
   authorization_key_id: string | null;
   decided_by: string | null;
   decided_at: number | null;
+  summary: string | null;
 };
 
 function rowToApproval(row: ApprovalRow): Approval {
@@ -51,6 +52,7 @@ function rowToApproval(row: ApprovalRow): Approval {
     authorizationKeyId: row.authorization_key_id ?? undefined,
     decidedBy: row.decided_by ?? undefined,
     decidedAt: row.decided_at ?? undefined,
+    summary: row.summary ? JSON.parse(row.summary) : undefined,
   });
 }
 
@@ -63,9 +65,9 @@ export class ApprovalStore {
       approval_type, risk_score, value_usd,
       created_at, expires_at, status, reason,
       authorization_signature, authorization_key_id,
-      decided_by, decided_at
+      decided_by, decided_at, summary
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   private readonly getStatement = db.prepare(`
@@ -129,6 +131,7 @@ export class ApprovalStore {
       approval.authorizationKeyId ?? null,
       approval.decidedBy ?? null,
       approval.decidedAt ?? null,
+      approval.summary ? JSON.stringify(approval.summary) : null,
     );
 
     return approval;

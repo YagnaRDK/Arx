@@ -79,12 +79,12 @@ describe("simulated app-ethereum signer", () => {
     // Recovered again here, independently of the service, so the assertion does
     // not rest on the same code that set the flag.
     const recovered = await recoverAddress({
-      hash: unsignedTransactionDigest(transaction.transaction),
+      hash: unsignedTransactionDigest(transaction.transaction) as `0x${string}`,
       signature: result.rawSignature as `0x${string}`,
     });
 
     expect(recovered).toBe(SIM_SIGNER_EXPECTED_ADDRESS);
-    expect(recovered).toBe(result.signerAddress);
+    expect(recovered).toBe(result.signerAddress as `0x${string}`);
   });
 
   it("returns yParity for a typed transaction rather than an EIP-155 v", async () => {
@@ -94,7 +94,7 @@ describe("simulated app-ethereum signer", () => {
 
     // The app returns the parity itself for EIP-2718 envelopes. Adding 27 or
     // applying EIP-155 here would produce an unrecoverable signature.
-    expect([0, 1]).toContain(result.yParity);
+    expect([0, 1]).toContain(result.yParity as number);
     expect(result.v).toBe(`0x${result.yParity}`);
   });
 
@@ -116,11 +116,11 @@ describe("simulated app-ethereum signer", () => {
     expect(result.verified).toBe(true);
 
     const recovered = await recoverAddress({
-      hash: unsignedTransactionDigest(transaction.transaction),
+      hash: unsignedTransactionDigest(transaction.transaction) as `0x${string}`,
       signature: result.rawSignature as `0x${string}`,
     });
 
-    expect(recovered).toBe(result.signerAddress);
+    expect(recovered).toBe(result.signerAddress as `0x${string}`);
   });
 
   it("signs a legacy transaction with an EIP-155 v", async () => {
@@ -133,7 +133,7 @@ describe("simulated app-ethereum signer", () => {
 
     // chainId * 2 + 35 + parity, at full precision rather than the single byte
     // the device sends.
-    const expectedV = BigInt(11155111) * 2n + 35n + BigInt(result.yParity!);
+    const expectedV = 11155111n * 2n + 35n + BigInt(result.yParity as number);
     expect(BigInt(result.v!)).toBe(expectedV);
   });
 

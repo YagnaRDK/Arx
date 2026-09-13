@@ -80,6 +80,32 @@ export const ApprovalSchema = z.object({
   reason: z.string(),
 
   /**
+   * A human-readable summary of what is being authorized.
+   *
+   * A person asked to confirm a transaction must be able to see who is being
+   * paid and how much. Storing only the transaction hash makes the escalation
+   * queue unreviewable — the operator would be confirming an opaque digest,
+   * which is not a meaningful gate. This is display evidence only: the hash
+   * remains the binding, so a mismatch between this summary and the bytes
+   * cannot make an unapproved transaction signable.
+   */
+  summary: z
+    .object({
+      to: z.string().nullable(),
+      valueWei: z.string(),
+      chainId: z.number().int().positive(),
+      /** 4-byte selector, or null for a plain value transfer. */
+      selector: z.string().nullable(),
+      /** Decoded call description, when the calldata was understood. */
+      method: z.string().nullable(),
+      /** Recipients found inside the calldata, which `to` does not reveal. */
+      calldataRecipients: z.array(z.string()).default([]),
+      /** Resolved name for `to`, when one was established. */
+      recipientName: z.string().nullable().optional(),
+    })
+    .optional(),
+
+  /**
    * Arx's own signature over the approval's binding fields. The signer boundary
    * verifies this before touching the device, so a forged approval row in the
    * database is not by itself sufficient to obtain a signature.

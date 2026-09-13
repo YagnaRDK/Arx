@@ -159,23 +159,6 @@ response carries the `source` of the data behind it.
 
 ---
 
-## Security invariants
-
-Twelve, enumerated in [AGENTS.md](AGENTS.md) and each covered by a test.
-
-The ones worth stating here:
-
-- The transaction signed is byte-identical to the transaction approved.
-- A consumed approval cannot be reused, **including under concurrency** — the
-  claim is a compare-and-swap, and there is a genuinely concurrent test.
-- An agent cannot mint or widen its own capability. That is a control-plane
-  action behind a separate credential.
-- Every external dependency distinguishes _"checked, clean"_ from _"could not
-  check"_. Unknown resolves to DENY or ABORT, never ALLOW.
-- The audit chain cannot be edited without detection.
-
----
-
 ## Layout
 
 ```

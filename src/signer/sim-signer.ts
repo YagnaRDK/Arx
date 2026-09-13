@@ -175,5 +175,5 @@ export class SimSignerAdapter implements SignerAdapter {
   }
 }
 
-export const SIM_SIGNER_EXPECTED_ADDRESS =
+export const SIM_SIGNER_EXPECTED_ADDRESS: `0x${string}` =
   "0xDad77910DbDFdE764fC21FCD4E74D71bBACA6D8D";

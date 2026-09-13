@@ -11,7 +11,10 @@
     "demo": "bun run scripts/demo.ts",
     "seed": "bun run scripts/seed.ts",
     "mcp": "bun run src/mcp/server.ts",
-    "speculos:up": "bash scripts/speculos-up.sh"
+    "speculos:up": "bash scripts/speculos-up.sh",
+    "attack": "bun run scripts/attack.ts",
+    "demo:agent": "bun run src/agent/run-demo.ts",
+    "demo:json": "bun run scripts/demo.ts --json"
   },
   "private": true,
   "dependencies": {

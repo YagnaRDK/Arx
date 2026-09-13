@@ -94,6 +94,13 @@ export const DECISION_CODES = [
   "SIGNATURE_VERIFICATION_FAILED",
   "SIGNER_ADDRESS_MISMATCH",
 
+  /**
+   * The firewall was invoked without the context it needs to enforce anything.
+   * Reported so an audit reader can tell "inspected and permitted" from
+   * "never actually inspected" — a distinction that would otherwise be silent.
+   */
+  "FIREWALL_NOT_ENGAGED",
+
   // Internal
   "INTERNAL_ERROR",
 ] as const;
